@@ -1,0 +1,18 @@
+require('dotenv').config();
+
+module.exports = {
+  META_ACCESS_TOKEN: process.env.META_ACCESS_TOKEN,
+  META_APP_SECRET: process.env.META_APP_SECRET,
+  META_IG_USER_ID: process.env.META_IG_USER_ID,
+  FACEBOOK_PAGE_ACCESS_TOKEN: process.env.FACEBOOK_PAGE_ACCESS_TOKEN,
+  FACEBOOK_PAGE_ID: process.env.FACEBOOK_PAGE_ID,
+  FACEBOOK_APP_SECRET: process.env.FACEBOOK_APP_SECRET,
+  LLM_API_KEY: process.env.LLM_API_KEY,
+  LLM_BASE_URL: process.env.LLM_BASE_URL,
+  LLM_MODEL: process.env.LLM_MODEL,
+  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
+  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
+  WEBHOOK_VERIFY_TOKEN: process.env.WEBHOOK_VERIFY_TOKEN,
+  WEBHOOK_PORT: process.env.WEBHOOK_PORT || 3000,
+  DRY_RUN: process.env.DRY_RUN === 'true'
+};
