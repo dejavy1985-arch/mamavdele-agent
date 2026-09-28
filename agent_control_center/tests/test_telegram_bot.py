@@ -71,6 +71,8 @@ class TelegramBotTests(unittest.TestCase):
         def fake_call(token, method, params, timeout=60):
             if method == "getMe":
                 return {"ok": True, "result": {"username": "testbot"}}
+            if method == "getWebhookInfo":
+                return {"ok": True, "result": {"url": ""}}
             if method == "sendMessage":
                 sent.append(params)
                 return {"ok": True}

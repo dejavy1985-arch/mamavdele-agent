@@ -1,26 +1,28 @@
-# Пример службы systemd для Linux-сервера (VPS).
-# Замените USER и путь на свои, затем:
-#   sudo cp deploy/acc.service /etc/systemd/system/acc.service
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now acc
+# Служба systemd для Клопа на Linux-сервере (VPS).
+# scripts/install_server.sh сам подставляет пользователя и путь и кладёт файл в
+# /etc/systemd/system/acc.service, но службу НЕ включает. Включить после пробного
+# запуска (python3 -m acc.cli trial --telegram):
+#   systemctl enable --now acc
 # Служба стартует при загрузке сервера и перезапускается после падения.
 # Журнал службы: journalctl -u acc -f
+# Пока служба работает, пробный запуск с --telegram не пройдёт (Telegram отдаёт
+# сообщения только одному получателю): systemctl stop acc
 
 [Unit]
-Description=agent_control_center (Telegram центр управления агентами)
+Description=Клоп: центр управления агентами из Telegram
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=USER
-WorkingDirectory=/home/USER/agent_control_center
+User=klop
+WorkingDirectory=/home/klop/klop/agent_control_center
+# Claude Code ставится в ~/.local/bin пользователя, служба должна его видеть.
+Environment=PATH=/home/klop/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 -m acc.telegram_bot config/control_center.json
 Restart=always
 RestartSec=5
-# Токен лучше хранить в config/telegram_token.txt (chmod 600).
-# Либо раскомментируйте строку ниже (файл службы тогда тоже секрет):
-# Environment=ACC_TELEGRAM_BOT_TOKEN=ваш_токен
+# Токен бота лежит в config/telegram_token.txt (права 600), в этот файл его не пишите.
 
 [Install]
 WantedBy=multi-user.target

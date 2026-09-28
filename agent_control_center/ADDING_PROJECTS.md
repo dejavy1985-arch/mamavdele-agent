@@ -28,6 +28,7 @@ python3 -m acc.cli add-home my-project --title "Мой проект" --keywords 
     "type": "claude_code",
     "permission_mode": "acceptEdits",
     "max_turns": 30,
+    "max_budget_usd": 2,
     "timeout_sec": 1800,
     "sandbox": "required",
     "network": true,
@@ -37,7 +38,15 @@ python3 -m acc.cli add-home my-project --title "Мой проект" --keywords 
 ```
 
 - Ключ: одной строкой `ANTHROPIC_API_KEY=...` в `homes/my-project/secrets/agent.env`
-  (папка `secrets` в git не попадает). Ключ получает только агент этого домика.
+  (папка `secrets` в git не попадает). Вместо ключа можно подписку Claude:
+  `CLAUDE_CODE_OAUTH_TOKEN=...` (токен выдаёт команда `claude setup-token`). Ключ
+  получает только агент этого домика.
+- `max_budget_usd`: предел расходов на одну задачу, после него Claude Code
+  останавливается.
+- В песочнице агенту без подтверждения разрешены команды, чтение, правка файлов и
+  интернет (подтверждать некому, а границы держит песочница). Сузить список:
+  `allowed_tools`, отключить: `"sandbox_tools": false`. Без песочницы разрешена
+  только правка файлов.
 - Память проекта: файл `CLAUDE.md` в папке домика. HOME агента указывает в его
   папку, поэтому настройки и сессии Claude Code у каждого домика свои.
 - `continue_session`: следующая задача продолжает разговор с агентом (`--resume`).

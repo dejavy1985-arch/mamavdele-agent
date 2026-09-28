@@ -41,13 +41,17 @@ class TelegramEndToEndTests(unittest.TestCase):
     def tearDown(self):
         signal.signal(signal.SIGTERM, self._sigterm)
 
-    def run_bot(self, updates, until, timeout=20):
+    def run_bot(self, updates, until, timeout=20, webhook=""):
         """Запустить бота с поддельным Telegram; остановить, когда until(sent) истинно."""
         sent = []
+        self.methods = []
         pending = [list(updates)]
         deadline = time.monotonic() + timeout
 
         def fake_call(token, method, params, timeout=60):
+            self.methods.append(method)
+            if method == "getWebhookInfo":
+                return {"ok": True, "result": {"url": webhook}}
             if method == "getMe":
                 return {"ok": True, "result": {"username": "klop_test_bot"}}
             if method == "sendMessage":
@@ -64,6 +68,7 @@ class TelegramEndToEndTests(unittest.TestCase):
             raise AssertionError(method)
 
         out, err = io.StringIO(), io.StringIO()
+        self.err = err
         with mock.patch.object(telegram_bot, "_call", side_effect=fake_call), \
                 mock.patch.dict(os.environ, {"ACC_TELEGRAM_BOT_TOKEN": "test-token"}), \
                 redirect_stdout(out), redirect_stderr(err):
@@ -118,6 +123,34 @@ class TelegramEndToEndTests(unittest.TestCase):
         self.assertEqual(len(notice), 1)
         self.assertEqual((notice[0]["chat_id"], self.reply_to(notice[0])), (111, 60))
         self.assertIn(t["id"], notice[0]["text"])
+
+
+class TelegramSafetyTests(TelegramEndToEndTests):
+    """Защита от чужого бота и от второго получателя сообщений."""
+
+    def test_bot_with_foreign_webhook_is_not_used(self):
+        # Например, по ошибке взят токен бота действующего агента: у него есть webhook.
+        code, sent = self.run_bot([_update(111, 111, 70, "тест: переверни а")],
+                                  until=lambda s: True,
+                                  webhook="https://agent.example.org/webhook/secret")
+        self.assertEqual(code, 5)
+        self.assertEqual(sent, [])
+        self.assertNotIn("getUpdates", self.methods)
+        self.assertNotIn("deleteWebhook", self.methods)
+        self.assertIn("agent.example.org", self.err.getvalue())
+        self.assertNotIn("secret", self.err.getvalue())
+
+    def test_conflict_is_reported_as_error(self):
+        import urllib.error
+        with mock.patch.object(telegram_bot, "_call", side_effect=urllib.error.HTTPError(
+                "u", 409, "Conflict", {}, None)):
+            with self.assertRaises(telegram_bot.TelegramConflict):
+                telegram_bot.get_updates("t", None, 0)
+
+    # Унаследованные сквозные тесты здесь не повторяем.
+    test_task_executed_and_result_returned_to_same_chat = None
+    test_status_of_failed_task_returned_to_chat = None
+    test_interrupted_task_reported_after_restart = None
 
 
 if __name__ == "__main__":

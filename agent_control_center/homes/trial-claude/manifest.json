@@ -1,0 +1,20 @@
+{
+  "id": "trial-claude",
+  "title": "Пробный агент Claude Code",
+  "summary": "ТЕСТОВЫЙ домик для пробного запуска Клопа на сервере с настоящим Claude Code. Не рабочий проект, к действующим агентам отношения не имеет.",
+  "status": "connected",
+  "test": true,
+  "keywords": ["проба", "пробный"],
+  "aliases": ["проба"],
+  "adapter": {
+    "type": "claude_code",
+    "permission_mode": "acceptEdits",
+    "max_turns": 10,
+    "max_budget_usd": 0.5,
+    "timeout_sec": 600,
+    "sandbox": "required",
+    "network": true,
+    "continue_session": true
+  },
+  "boundaries_note": "Ключ Claude кладётся только на сервере в secrets/agent.env (в git не попадает). Центр не публикует, не пишет клиентам, не платит, не меняет токены."
+}

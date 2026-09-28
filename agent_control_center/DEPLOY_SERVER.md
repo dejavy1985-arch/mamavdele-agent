@@ -19,30 +19,27 @@ polling). Для этого нужен сервер, где разрешён п�
 
 ## Установка на VPS
 
-0. Поставьте песочницу для агентов и, если нужны агенты на Claude Code, сам Claude Code:
-   ```bash
-   sudo apt install -y bubblewrap
-   curl -fsSL https://claude.ai/install.sh | bash   # или: npm install -g @anthropic-ai/claude-code
-   ```
-   Без bubblewrap агенты с `sandbox: required` не запустятся (так задумано).
-1. Скопируйте папку `agent_control_center` на сервер, например в `~/agent_control_center`.
-2. Проверка (бот не запускается, токен не нужен):
-   ```bash
-   cd ~/agent_control_center
-   bash scripts/run_server.sh --check
-   ```
-   Должно быть `OK` в тестах и «Итог: конфиг и домики валидны».
-3. Конфиг: скопируйте `config/control_center.example.json` в
-   `config/control_center.json` и впишите свой Telegram user_id.
-4. Токен (когда решите включить Telegram): одной строкой в
-   `config/telegram_token.txt`, затем `chmod 600 config/telegram_token.txt`.
-   Файл в git не попадает.
-5. Проверка выполнения без Telegram: `python3 -m acc.cli ask "тест: переверни привет"`.
-   Должно прийти «✅ ... выполнил» и перевёрнутый текст.
-6. Пробный запуск бота: `bash scripts/run_server.sh` (остановить Ctrl+C). При неверном
-   токене центр сразу скажет об этом и выйдет. Напишите боту: «тест: переверни привет».
-7. Постоянная работа: служба из `deploy/acc.service` (инструкция внутри файла).
-   Журнал службы: `journalctl -u acc -f`.
+Подробно и по шагам для Beget: `BEGET_TRIAL.md`. Коротко:
+
+1. От root на чистом Ubuntu 22.04 или 24.04: `bash scripts/install_server.sh`. Скрипт
+   ставит python3, git, bubblewrap, создаёт пользователя `klop` без прав
+   администратора, скачивает только папку Клопа, ставит Claude Code, проверяет
+   песочницу (на Ubuntu 24.04 при необходимости добавляет профиль AppArmor для bwrap)
+   и кладёт файл службы, не включая её.
+2. От пользователя klop: `bash scripts/setup_secrets.sh`. Скрытый ввод ключа Claude
+   для пробного агента, токена нового бота и вашего user_id. Файлы с правами 600,
+   в git не попадают.
+3. Пробный запуск: `python3 -m acc.cli trial --telegram`. Отчёт в `var/trial_report.md`,
+   ключей в нём нет.
+4. После успешной проверки, от root: `systemctl enable --now acc`. Журнал службы:
+   `journalctl -u acc -f`.
+
+Проверка без Telegram и без ключей: `bash scripts/run_server.sh --check`.
+
+Бот должен быть отдельным. Если у бота уже настроен webhook (так бывает у бота
+действующего агента), Клоп откажется с ним работать и чужой webhook не тронет.
+Если сообщения бота уже получает второй запущенный Клоп, в журнале будет сказано,
+что его нужно остановить.
 
 ## Что переживает перезапуск
 

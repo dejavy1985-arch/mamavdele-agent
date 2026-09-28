@@ -44,6 +44,16 @@ def _call(token: str, method: str, params: dict, timeout: int = 60) -> dict:
 TELEGRAM_TEXT_LIMIT = 4000  # у Telegram предел 4096 символов на сообщение
 
 
+class TelegramConflict(RuntimeError):
+    """Сообщения этого бота уже получает кто-то другой: второй экземпляр центра или
+    webhook другого сервиса. Telegram отдаёт сообщения только одному получателю."""
+
+
+CONFLICT_TEXT = ("Telegram отвечает, что сообщения этого бота уже получает другая "
+                 "программа (второй запущенный центр или служба acc). Остановите её: "
+                 "sudo systemctl stop acc")
+
+
 def check_token(token: str) -> str:
     """Проверить токен запросом getMe. Возвращает имя бота или бросает ошибку.
 
@@ -60,7 +70,18 @@ def check_token(token: str) -> str:
     return resp.get("result", {}).get("username", "")
 
 
-def send_message(token: str, chat_id, text: str, reply_to=None) -> None:
+def webhook_host(token: str) -> str:
+    """Адрес webhook бота (только домен) или пустая строка, если webhook не настроен.
+
+    Если у бота есть webhook, его сообщения получает другой сервис. Так бывает, когда
+    для центра по ошибке взят токен бота действующего агента. Центр такой webhook не
+    трогает и с этим ботом не работает."""
+    resp = _call(token, "getWebhookInfo", {}, timeout=10)
+    url = (resp.get("result") or {}).get("url") or ""
+    return urllib.parse.urlsplit(url).hostname or ("задан" if url else "")
+
+
+def send_message(token: str, chat_id, text: str, reply_to=None) -> bool:
     if len(text) > TELEGRAM_TEXT_LIMIT:
         text = text[: TELEGRAM_TEXT_LIMIT - 20] + "\n...(сокращено)"
     params = {"chat_id": chat_id, "text": text}
@@ -69,9 +90,11 @@ def send_message(token: str, chat_id, text: str, reply_to=None) -> None:
         params["reply_parameters"] = json.dumps(
             {"message_id": int(reply_to), "allow_sending_without_reply": True})
     try:
-        _call(token, "sendMessage", params, timeout=10)
+        resp = _call(token, "sendMessage", params, timeout=10)
     except Exception as exc:  # сеть не должна ронять цикл
         print(f"[telegram] ошибка отправки: {exc}", file=sys.stderr)
+        return False
+    return bool(resp.get("ok", True))
 
 
 def run(config_path: str) -> int:
@@ -94,6 +117,16 @@ def run(config_path: str) -> int:
         print(f"Не удалось связаться с Telegram: {exc}", file=sys.stderr)
         return 4
     print(f"Токен принят, бот @{bot_name}.")
+    try:
+        hook = webhook_host(token)
+    except Exception as exc:
+        print(f"Не удалось связаться с Telegram: {exc}", file=sys.stderr)
+        return 4
+    if hook:
+        print(f"У бота @{bot_name} настроен webhook ({hook}): его сообщения получает другой "
+              "сервис, возможно действующий агент. Клопу нужен отдельный бот от @BotFather. "
+              "Чужой webhook центр не трогает.", file=sys.stderr)
+        return 5
 
     dispatcher = Dispatcher(config)
     log = dispatcher.audit
@@ -141,45 +174,66 @@ def run(config_path: str) -> int:
     return 0
 
 
+def get_updates(token: str, offset, timeout: int = 50) -> list:
+    try:
+        resp = _call(token, "getUpdates",
+                     {"offset": offset, "timeout": timeout,
+                      "allowed_updates": json.dumps(["message"])},
+                     timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            raise TelegramConflict(CONFLICT_TEXT) from exc
+        raise
+    return resp.get("result", [])
+
+
+def handle_update(token: str, dispatcher: Dispatcher, log, update: dict):
+    """Одно сообщение: диспетчер, затем ответ в тот же чат ответом на сообщение.
+    Возвращает (сообщение, ответ диспетчера или None при ошибке)."""
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    user = message.get("from") or {}
+    text = message.get("text", "")
+    user_id = user.get("id")
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    try:
+        response = dispatcher.handle(user_id, text, chat_id=chat_id, reply_to=message_id)
+    except Exception as exc:
+        log.log("handle_error", level=audit_mod.ERROR, user_id=user_id, text=str(exc))
+        if chat_id is not None:
+            send_message(token, chat_id, "Внутренняя ошибка. Записал в журнал.")
+        return message, None
+
+    if not response.silent and chat_id is not None:
+        send_message(token, chat_id, response.message, message_id)
+    return message, response
+
+
 def _poll_loop(token: str, dispatcher: Dispatcher, log) -> None:
     offset = dispatcher.state.telegram_offset
+    conflict_reported = False
     while True:
         try:
-            resp = _call(
-                token,
-                "getUpdates",
-                {"offset": offset, "timeout": 50, "allowed_updates": json.dumps(["message"])},
-                timeout=50,
-            )
+            updates = get_updates(token, offset)
+        except TelegramConflict as exc:
+            if not conflict_reported:  # один раз в журнал службы, дальше тихо ждём
+                print(str(exc), file=sys.stderr)
+                conflict_reported = True
+            log.log("poll_conflict", level=audit_mod.ERROR, text=str(exc))
+            time.sleep(10)
+            continue
         except Exception as exc:
             log.log("poll_error", level=audit_mod.ERROR, text=str(exc))
             time.sleep(3)  # пауза и повтор, цикл не падает
             continue
+        conflict_reported = False
 
-        for update in resp.get("result", []):
+        for update in updates:
             offset = update["update_id"] + 1
             dispatcher.state.set_telegram_offset(offset)  # фиксируем прогресс сразу
-
-            message = update.get("message") or {}
-            chat = message.get("chat") or {}
-            user = message.get("from") or {}
-            text = message.get("text", "")
-            user_id = user.get("id")
-            chat_id = chat.get("id")
-            message_id = message.get("message_id")
-
-            try:
-                response = dispatcher.handle(user_id, text, chat_id=chat_id,
-                                             reply_to=message_id)
-            except Exception as exc:
-                log.log("handle_error", level=audit_mod.ERROR, user_id=user_id, text=str(exc))
-                if chat_id is not None:
-                    send_message(token, chat_id, "Внутренняя ошибка. Записал в журнал.")
-                continue
-
-            if response.silent or chat_id is None:
-                continue
-            send_message(token, chat_id, response.message, message_id)
+            handle_update(token, dispatcher, log, update)
 
 
 if __name__ == "__main__":

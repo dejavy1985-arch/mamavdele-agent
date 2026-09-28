@@ -25,3 +25,9 @@ homes/*/notes.txt
 homes/*/.claude/
 homes/*/.claude.json
 homes/*/.cache/
+
+# Всё, что создаёт пробный агент в своей папке, кроме описания домика.
+homes/trial-claude/*
+!homes/trial-claude/manifest.json
+!homes/trial-claude/CLAUDE.md
+!homes/trial-claude/secrets/

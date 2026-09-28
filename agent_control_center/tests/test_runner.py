@@ -145,13 +145,47 @@ class SandboxIsolationTests(unittest.TestCase):
         self.assertEqual(res.output, "нет сети")
 
 
+class DnsInSandboxTests(unittest.TestCase):
+    """На Ubuntu resolv.conf это ссылка в /run: без неё в песочнице нет DNS."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.target_dir = os.path.join(self.tmp, "run", "resolve")
+        os.makedirs(self.target_dir)
+        with open(os.path.join(self.target_dir, "stub-resolv.conf"), "w") as fh:
+            fh.write("nameserver 127.0.0.53\n")
+        self.link = os.path.join(self.tmp, "resolv.conf")
+        os.symlink(os.path.join(self.target_dir, "stub-resolv.conf"), self.link)
+
+    def test_symlinked_resolv_conf_folder_is_mounted(self):
+        self.assertEqual(runner._dns_binds(self.link),
+                         ["--ro-bind", self.target_dir, self.target_dir])
+
+    def test_regular_file_needs_nothing(self):
+        plain = os.path.join(self.tmp, "plain.conf")
+        open(plain, "w").close()
+        self.assertEqual(runner._dns_binds(plain), [])
+
+    def test_only_with_network(self):
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home)
+        with mock.patch.object(runner, "RESOLV_CONF", self.link), \
+                mock.patch("shutil.which", return_value="/usr/bin/bwrap"):
+            with_net = runner.build_sandbox_command(["true"], home, network=True)
+            without = runner.build_sandbox_command(["true"], home, network=False)
+        self.assertIn(self.target_dir, with_net)
+        self.assertNotIn(self.target_dir, without)
+
+
 FAKE_CLAUDE = r'''#!{python}
 import json, os, sys
 args = sys.argv[1:]
 prompt = sys.stdin.read()
 with open(os.path.join(os.getcwd(), "claude_calls.jsonl"), "a", encoding="utf-8") as fh:
     fh.write(json.dumps({{"args": args, "home": os.environ.get("HOME"),
-                        "key": os.environ.get("ANTHROPIC_API_KEY")}}, ensure_ascii=False) + "\n")
+                        "key": os.environ.get("ANTHROPIC_API_KEY"),
+                        "autoupdate": os.environ.get("DISABLE_AUTOUPDATER")}},
+                       ensure_ascii=False) + "\n")
 resumed = "--resume" in args
 err = "ошибка" in prompt
 print(json.dumps({{"type": "result", "subtype": "error_during_execution" if err else "success",
@@ -214,7 +248,52 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.assertEqual(args[args.index("--output-format") + 1], "json")
         rules = args[args.index("--append-system-prompt") + 1]
         self.assertIn("Не публикуй", rules)
+        self.assertIn("Интернет доступен", rules)
         self.assertEqual(args[args.index("--max-turns") + 1], "5")
+        self.assertNotIn("--max-budget-usd", args)
+        # Самообновление выключено: папка установки в песочнице только для чтения.
+        self.assertEqual(call["autoupdate"], "1")
+
+    def test_budget_limit_and_network_off_rules(self):
+        spec = dict(self.project.adapter, max_budget_usd=0.5, network=False)
+        runner.ClaudeCodeAdapter(spec).execute(self.project, _task("x"), ExecContext())
+        args = json.loads(open(self.calls, encoding="utf-8").readline())["args"]
+        self.assertEqual(args[args.index("--max-budget-usd") + 1], "0.5")
+        self.assertIn("Интернет отключён", args[args.index("--append-system-prompt") + 1])
+
+    def _args(self, **spec_extra):
+        spec = dict(self.project.adapter, **spec_extra)
+        runner.ClaudeCodeAdapter(spec).execute(self.project, _task("x"), ExecContext())
+        lines = open(self.calls, encoding="utf-8").read().splitlines()
+        return json.loads(lines[-1])["args"]
+
+    def test_tools_allowed_only_inside_sandbox(self):
+        # В песочнице агенту разрешены команды и интернет, иначе он умеет только править файлы.
+        with mock.patch.object(runner, "will_isolate", return_value=True):
+            args = self._args()
+        tools = args[args.index("--allowedTools") + 1].split(",")
+        self.assertIn("Bash", tools)
+        self.assertIn("WebFetch", tools)
+        # Без песочницы ничего сверх режима acceptEdits не разрешается.
+        args = self._args(sandbox="off")
+        self.assertNotIn("--allowedTools", args)
+
+    def test_explicit_tools_from_manifest_win(self):
+        with mock.patch.object(runner, "will_isolate", return_value=True):
+            args = self._args(allowed_tools=["Read"])
+        self.assertEqual(args[args.index("--allowedTools") + 1], "Read")
+
+    def test_claude_found_in_user_local_bin(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            local = os.path.join(fake_home, ".local", "bin")
+            os.makedirs(local)
+            target = os.path.join(local, "claude")
+            with open(target, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(target, 0o755)
+            with mock.patch("shutil.which", return_value=None), \
+                    mock.patch.dict(os.environ, {"HOME": fake_home}):
+                self.assertEqual(runner.find_claude(), target)
 
     def test_error_result_is_failure(self):
         res = self.execute("вызови ошибка")
@@ -223,7 +302,7 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
 
     def test_missing_claude_is_not_executed(self):
         spec = dict(self.project.adapter, claude_bin=None)
-        with mock.patch("shutil.which", return_value=None):
+        with mock.patch.object(runner, "find_claude", return_value=None):
             res = runner.ClaudeCodeAdapter(spec).execute(self.project, _task("x"), ExecContext())
         self.assertFalse(res.executed)
         self.assertIn("не найден", res.error)

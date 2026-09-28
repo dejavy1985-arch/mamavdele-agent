@@ -43,14 +43,27 @@ SANDBOX_PREFERRED = "preferred"
 SANDBOX_OFF = "off"
 
 SYSTEM_RO = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc"]
+RESOLV_CONF = "/etc/resolv.conf"
 
 # Правила этапа 1 для самого агента (дополняют техническую изоляцию и границы центра).
+# Формулировка точная: слишком общее «работай только в папке» агент понимал как запрет
+# на интернет и отказывался от обычных задач.
 AGENT_RULES = (
-    "Ты агент проекта «{title}». Работай только в текущей папке проекта. "
+    "Ты агент проекта «{title}». Твоя рабочая папка: текущая. Файлы создавай, читай и "
+    "меняй только в ней; другие папки сервера тебе технически недоступны. {network} "
     "Не публикуй контент, не пиши клиентам, не проводи платежи, не меняй токены, "
     "доступы и настройки других агентов. Ответ дай кратко, по-русски: что сделано "
     "и что получилось."
 )
+NETWORK_ON = "Интернет доступен: пользуйся им, если это нужно для задачи."
+NETWORK_OFF = "Интернет отключён."
+
+# Инструменты Claude Code, разрешённые без подтверждения, когда агент в песочнице.
+# Подтверждать их некому (агент работает без интерфейса), а без разрешения Claude Code
+# отклоняет всё, кроме правки файлов: не выполнить команду, не открыть сайт. Границы
+# здесь держит песочница: своя папка, свои секреты, сеть по манифесту.
+SANDBOX_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit",
+                 "TodoWrite", "WebFetch", "WebSearch", "Task", "Agent"]
 
 
 @dataclass
@@ -86,6 +99,20 @@ def _system_binds() -> List[str]:
     return args
 
 
+def _dns_binds(resolv: Optional[str] = None) -> List[str]:
+    """DNS в песочнице. На Ubuntu /etc/resolv.conf это ссылка в /run/systemd/resolve,
+    а /run в песочницу не попадает: без этой папки агент не нашёл бы ни один сайт,
+    в том числе сервер Claude."""
+    resolv = resolv or RESOLV_CONF
+    real = os.path.realpath(resolv)
+    if real == os.path.abspath(resolv) or not os.path.exists(real):
+        return []
+    if any(real == p or real.startswith(p + os.sep) for p in SYSTEM_RO):
+        return []
+    folder = os.path.dirname(real)
+    return ["--ro-bind", folder, folder]
+
+
 def sandbox_available() -> bool:
     """Есть ли рабочий bubblewrap (проверяется один раз)."""
     if "ok" not in _SANDBOX_STATE:
@@ -110,6 +137,11 @@ def _probe_sandbox() -> bool:
         return False
 
 
+def will_isolate(spec: Dict) -> bool:
+    """Будет ли агент запущен в песочнице при этом манифесте."""
+    return spec.get("sandbox", SANDBOX_REQUIRED) != SANDBOX_OFF and sandbox_available()
+
+
 def build_sandbox_command(cmd: Sequence[str], home: str, network: bool,
                           extra_ro: Sequence[str] = ()) -> List[str]:
     home = os.path.realpath(home)
@@ -120,6 +152,8 @@ def build_sandbox_command(cmd: Sequence[str], home: str, network: bool,
     # Сначала служебные файловые системы: отдельный /tmp монтируется ДО дополнительных
     # папок, иначе он закрыл бы собой те из них, что лежат внутри /tmp.
     args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+    if network:
+        args += _dns_binds()
     for p in extra_ro:
         if not p:
             continue
@@ -152,8 +186,10 @@ def read_env_file(path: str) -> Dict[str, str]:
     return env
 
 
-def build_env(home: str, project_id: str, task_id: str, spec: Dict) -> Dict[str, str]:
-    """Окружение с нуля: только необходимое, свои секреты домика, без чужих."""
+def build_env(home: str, project_id: str, task_id: str, spec: Dict,
+              defaults: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Окружение с нуля: только необходимое, свои секреты домика, без чужих.
+    defaults задаёт адаптер; секреты домика и env из манифеста могут их переопределить."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "LANG": "C.UTF-8",
@@ -169,6 +205,7 @@ def build_env(home: str, project_id: str, task_id: str, spec: Dict) -> Dict[str,
             if k in os.environ:
                 env[k] = os.environ[k]
         env["USERPROFILE"] = home
+    env.update(defaults or {})
     for name in spec.get("pass_env", []):  # явно разрешённые переменные сервера
         if name in os.environ:
             env[name] = os.environ[name]
@@ -257,14 +294,15 @@ def run_process(cmd: Sequence[str], cwd: str, env: Dict[str, str], stdin_text: s
 
 
 def _run_in_home(project, cmd: List[str], spec: Dict, task: Dict, ctx: ExecContext,
-                 extra_ro: Sequence[str] = (), default_network: bool = False) -> ExecResult:
+                 extra_ro: Sequence[str] = (), default_network: bool = False,
+                 env_defaults: Optional[Dict[str, str]] = None) -> ExecResult:
     home = os.path.realpath(project.home_dir)
-    env = build_env(home, project.id, task["id"], spec)
+    env = build_env(home, project.id, task["id"], spec, env_defaults)
     policy = spec.get("sandbox", SANDBOX_REQUIRED)
     network = bool(spec.get("network", default_network))
     notes: List[str] = []
     isolated = False
-    if policy != SANDBOX_OFF and sandbox_available():
+    if will_isolate(spec):
         cmd = build_sandbox_command(cmd, home, network,
                                     list(extra_ro) + list(spec.get("sandbox_ro_binds", [])))
         env["TMPDIR"] = "/tmp"
@@ -313,6 +351,16 @@ class ProcessAdapter:
         return _run_in_home(project, _expand(cmd, home), self.spec, task, ctx, extra)
 
 
+def find_claude() -> Optional[str]:
+    """Команда claude: из PATH, иначе из стандартного места установщика (~/.local/bin),
+    которого может не быть в PATH у службы."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    local = os.path.expanduser("~/.local/bin/claude")
+    return local if os.path.isfile(local) and os.access(local, os.X_OK) else None
+
+
 class ClaudeCodeAdapter:
     """Claude Code без интерфейса. У каждого домика своя сессия, память и ключ."""
 
@@ -321,7 +369,8 @@ class ClaudeCodeAdapter:
     def __init__(self, spec: Dict) -> None:
         self.spec = spec
 
-    def build_command(self, project, ctx: ExecContext, claude: str) -> List[str]:
+    def build_command(self, project, ctx: ExecContext, claude: str,
+                      isolated: bool = False) -> List[str]:
         s = self.spec
         cmd = [claude, "-p", "--output-format", "json",
                "--permission-mode", s.get("permission_mode", "acceptEdits")]
@@ -333,11 +382,18 @@ class ClaudeCodeAdapter:
             cmd += ["--model", str(s["model"])]
         if s.get("max_turns"):
             cmd += ["--max-turns", str(int(s["max_turns"]))]
-        if s.get("allowed_tools"):
-            cmd += ["--allowedTools", ",".join(s["allowed_tools"])]
+        if s.get("max_budget_usd"):
+            cmd += ["--max-budget-usd", str(float(s["max_budget_usd"]))]
+        tools = s.get("allowed_tools")
+        if not tools and isolated and s.get("sandbox_tools", True):
+            tools = SANDBOX_TOOLS
+        if tools:
+            cmd += ["--allowedTools", ",".join(tools)]
         if s.get("disallowed_tools"):
             cmd += ["--disallowedTools", ",".join(s["disallowed_tools"])]
-        rules = AGENT_RULES.format(title=project.title)
+        network = bool(s.get("network", True))
+        rules = AGENT_RULES.format(title=project.title,
+                                   network=NETWORK_ON if network else NETWORK_OFF)
         if s.get("append_system_prompt"):
             rules += "\n" + str(s["append_system_prompt"])
         cmd += ["--append-system-prompt", rules]
@@ -346,7 +402,7 @@ class ClaudeCodeAdapter:
         return cmd
 
     def execute(self, project, task: Dict, ctx: ExecContext) -> ExecResult:
-        claude = self.spec.get("claude_bin") or shutil.which("claude")
+        claude = self.spec.get("claude_bin") or find_claude()
         if not claude:
             return ExecResult(ok=False, executed=False,
                               error="Claude Code не найден на сервере (команда claude). "
@@ -355,8 +411,11 @@ class ClaudeCodeAdapter:
         # Песочнице нужно видеть сам Claude Code и его среду выполнения (node).
         install_prefix = os.path.dirname(os.path.dirname(claude))
         extra = [install_prefix, os.path.dirname(os.path.realpath(claude))]
-        cmd = self.build_command(project, ctx, claude)
-        res = _run_in_home(project, cmd, self.spec, task, ctx, extra, default_network=True)
+        cmd = self.build_command(project, ctx, claude, isolated=will_isolate(self.spec))
+        # Самообновление Claude Code в песочнице невозможно (папка установки только для
+        # чтения) и не нужно: версию обновляет владелец сервера.
+        res = _run_in_home(project, cmd, self.spec, task, ctx, extra, default_network=True,
+                           env_defaults={"DISABLE_AUTOUPDATER": "1"})
         if not res.executed or res.cancelled or res.timed_out:
             return res
         try:

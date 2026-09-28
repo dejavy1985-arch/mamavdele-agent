@@ -15,6 +15,9 @@
     python -m acc.cli recover          # подхватить прерванные поручения
     python -m acc.cli add-home ID --title "..." --keywords a,b --aliases x,y
     python -m acc.cli demo             # демо на ВРЕМЕННЫХ тестовых проектах
+    python -m acc.cli trial [--telegram]   # пробный запуск на сервере (домик trial-claude)
+    python -m acc.cli telegram-id      # узнать свой user_id: сначала напишите боту
+    python -m acc.cli set-owner ID     # принимать команды только от этого user_id
 
 Команда demo создаёт два ВРЕМЕННЫХ тестовых домика с настоящим тестовым агентом,
 показывает весь путь (маршрут, уточнение, подтверждение, выполнение, результат,
@@ -270,6 +273,85 @@ def cmd_demo(args) -> int:
     return 0
 
 
+PLACEHOLDER_USER_ID = 123456789  # число-образец из control_center.example.json
+
+
+def cmd_trial(args) -> int:
+    from .trial import run_trial
+
+    cfg_path = _resolve_config(args.config)
+    config = load_config(cfg_path)
+    if args.telegram and (cfg_path == EXAMPLE_CONFIG
+                          or PLACEHOLDER_USER_ID in config.allowed_user_ids):
+        # Иначе бот написал бы по номеру-образцу постороннему человеку.
+        _print("Для проверки Telegram нужен ваш user_id: bash scripts/setup_secrets.sh "
+               "или python3 -m acc.cli set-owner ВАШ_ID")
+        return 2
+    return run_trial(config, telegram=args.telegram, wait=args.wait * 60,
+                     run_tests=not args.no_tests)
+
+
+def cmd_telegram_id(args) -> int:
+    """Показать user_id тех, кто написал боту. Старые сообщения при этом помечаются
+    прочитанными, чтобы Клоп потом не принял их за задачи."""
+    from . import telegram_bot as tg
+
+    config = load_config(_resolve_config(args.config))
+    token = config.telegram_token()
+    if not token:
+        _print("Нет токена бота: bash scripts/setup_secrets.sh")
+        return 2
+    try:
+        name = tg.check_token(token)
+        hook = tg.webhook_host(token)
+        if hook:
+            _print(f"У бота @{name} настроен webhook ({hook}): это бот другого сервиса. "
+                   "Для Клопа нужен отдельный бот от @BotFather.")
+            return 5
+        updates = tg.get_updates(token, None, timeout=0)
+        if updates:
+            tg.get_updates(token, updates[-1]["update_id"] + 1, timeout=0)
+    except ValueError as exc:
+        _print(str(exc))
+        return 3
+    except Exception as exc:
+        _print(f"Не удалось связаться с Telegram: {exc}")
+        return 4
+    senders = {}
+    for u in updates:
+        m = u.get("message") or {}
+        f = m.get("from") or {}
+        if f.get("id"):
+            senders[f["id"]] = (f.get("first_name", ""), f.get("username", ""),
+                                (m.get("text") or "")[:40])
+    if not senders:
+        _print(f"Боту @{name} пока никто не писал. Откройте его в Telegram, нажмите Start, "
+               "напишите любое слово и повторите команду.")
+        return 1
+    _print(f"Боту @{name} писали:")
+    for uid, (first, username, text) in senders.items():
+        _print(f"  user_id {uid}: {first} {('@' + username) if username else ''} «{text}»")
+    return 0
+
+
+def cmd_set_owner(args) -> int:
+    path = args.config or DEFAULT_CONFIG
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    else:
+        with open(EXAMPLE_CONFIG, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data.pop("_comment", None)
+    data["allowed_user_ids"] = [args.user_id]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    _print(f"Команды принимаются только от user_id {args.user_id}. Файл: {path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="acc", description="Центр управления агентами (офлайн-инструменты)")
     p.add_argument("--config", help="путь к control_center.json (по умолчанию рабочий или пример)")
@@ -307,6 +389,18 @@ def build_parser() -> argparse.ArgumentParser:
     pa.set_defaults(func=cmd_add_home)
 
     sub.add_parser("demo", help="демо на временных тестовых проектах").set_defaults(func=cmd_demo)
+
+    pt = sub.add_parser("trial", help="пробный запуск на сервере с настоящим Claude Code")
+    pt.add_argument("--telegram", action="store_true", help="проверить и Telegram")
+    pt.add_argument("--wait", type=int, default=10, help="сколько минут ждать задачу из чата")
+    pt.add_argument("--no-tests", action="store_true", help="не запускать автотесты")
+    pt.set_defaults(func=cmd_trial)
+
+    sub.add_parser("telegram-id", help="показать user_id написавших боту").set_defaults(
+        func=cmd_telegram_id)
+    po = sub.add_parser("set-owner", help="принимать команды только от этого user_id")
+    po.add_argument("user_id", type=int)
+    po.set_defaults(func=cmd_set_owner)
     return p
 
 
