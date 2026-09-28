@@ -31,7 +31,28 @@ class ControlCenterConfig:
         return os.path.join(self.var_dir, "state.json")
 
     def telegram_token(self):
-        return os.environ.get(self.telegram_token_env)
+        # Сначала переменная окружения, затем локальный файл (для Windows без export).
+        # Файл config/telegram_token.txt не попадает в git (см. .gitignore).
+        env_token = os.environ.get(self.telegram_token_env)
+        if env_token:
+            return env_token.strip()
+        token_file = os.path.join(self.base_dir, "config", "telegram_token.txt")
+        # base_dir это папка, где лежит control_center.json (обычно .../config),
+        # поэтому проверяем и рядом с конфигом, и в подпапке config.
+        candidates = [
+            token_file,
+            os.path.join(self.base_dir, "telegram_token.txt"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        value = fh.read().strip()
+                    if value:
+                        return value
+                except OSError:
+                    continue
+        return None
 
 
 def load_config(config_path: str) -> ControlCenterConfig:

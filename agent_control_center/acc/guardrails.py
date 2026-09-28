@@ -73,3 +73,57 @@ def check_boundaries(text: str) -> BoundaryCheck:
         if any(p.search(text) for p in patterns):
             hit.append(cat)
     return BoundaryCheck(blocked=bool(hit), categories=hit)
+
+
+# Опасные, но НЕ запрещённые действия: их можно выполнить, но только после явного
+# подтверждения пользователя. Это аналог Plan Mode и подтверждения инструментов в
+# Jarvis: рискованное действие сначала показывается, потом выполняется.
+RISKY_PATTERNS = {
+    "delete_files": [
+        r"\bудали\b", r"\bудалить\b", r"\bснеси\b", r"\bсотри\b",
+        r"rm\s+-rf", r"\bdelete\b", r"\bremove\b", r"\bdrop\s+table",
+        r"\bdrop\s+database",
+    ],
+    "overwrite": [
+        r"\bперезапиши\b", r"\bперезаписать\b", r"\bзатри\b", r"overwrite",
+        r"git\s+reset\s+--hard", r"force\s+push", r"push\s+--force", r"--force\b",
+    ],
+    "deploy": [
+        r"\bдеплой", r"\bвыкати\b", r"\bвыкатить\b", r"\bразверни\s+на\s+прод",
+        r"\bdeploy\b", r"\bproduction\b", r"\bна\s+прод\b",
+    ],
+    "bulk": [
+        r"\bвсе\s+файлы\b", r"\bмассово\b", r"\bпо\s+всем\b", r"\ball\s+files\b",
+    ],
+}
+
+_COMPILED_RISKY = {
+    cat: [re.compile(p, re.IGNORECASE) for p in pats]
+    for cat, pats in RISKY_PATTERNS.items()
+}
+
+_RISKY_HUMAN = {
+    "delete_files": "удаление файлов или данных",
+    "overwrite": "перезапись или сброс изменений",
+    "deploy": "выкатка или деплой",
+    "bulk": "массовое изменение",
+}
+
+
+@dataclass
+class RiskCheck:
+    risky: bool
+    categories: List[str]
+
+    def human(self) -> str:
+        return ", ".join(_RISKY_HUMAN.get(c, c) for c in self.categories)
+
+
+def check_risky(text: str) -> RiskCheck:
+    """Определить, требует ли действие подтверждения (опасное, но разрешённое)."""
+    text = text or ""
+    hit = []
+    for cat, patterns in _COMPILED_RISKY.items():
+        if any(p.search(text) for p in patterns):
+            hit.append(cat)
+    return RiskCheck(risky=bool(hit), categories=hit)

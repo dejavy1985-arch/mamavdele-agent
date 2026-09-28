@@ -69,6 +69,36 @@ class DispatcherTests(unittest.TestCase):
         events = self.d.audit.tail(20)
         self.assertTrue(any(e.get("event") == "task_routed" for e in events))
 
+    # -- подтверждение опасных действий ------------------------------------
+    def test_risky_action_needs_confirmation_then_delivers(self):
+        r = self.d.handle(111, "удали комментарий в инстаграме")
+        self.assertEqual(r.type, disp.NEEDS_CONFIRMATION)
+        task_id = r.data["task_id"]
+        # Пока не подтверждено, поручение в домик не ушло.
+        inbox = os.path.join(self.config.homes_dir, "mamavdele-agent", "inbox", "tasks.jsonl")
+        self.assertFalse(os.path.exists(inbox))
+        # Подтверждаем -> доставка.
+        r2 = self.d.handle(111, f"/confirm {task_id}")
+        self.assertEqual(r2.type, disp.ROUTED)
+        self.assertTrue(os.path.exists(inbox))
+
+    def test_risky_action_can_be_rejected(self):
+        r = self.d.handle(111, "снеси ветку в инстаграм-проекте комментарии")
+        self.assertEqual(r.type, disp.NEEDS_CONFIRMATION)
+        task_id = r.data["task_id"]
+        r2 = self.d.handle(111, f"/reject {task_id}")
+        self.assertEqual(r2.type, disp.COMMAND)
+        from acc import store_db
+        self.assertEqual(self.d.store.get_task(task_id)["status"], store_db.REJECTED)
+
+    def test_queue_and_history_commands(self):
+        self.d.handle(111, "проверь комментарий в инстаграме")
+        rq = self.d.handle(111, "/queue")
+        rh = self.d.handle(111, "/history")
+        self.assertEqual(rq.type, disp.COMMAND)
+        self.assertEqual(rh.type, disp.COMMAND)
+        self.assertIn("История", rh.message)
+
 
 if __name__ == "__main__":
     unittest.main()

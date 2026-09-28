@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -21,9 +22,10 @@ from typing import Dict, Optional
 
 from . import audit as audit_mod
 from . import router as router_mod
+from . import store_db
 from .adapters import build_adapter
 from .config import ControlCenterConfig
-from .guardrails import check_boundaries
+from .guardrails import check_boundaries, check_risky
 from .registry import Registry
 from .security import Allowlist
 from .state import State
@@ -36,6 +38,7 @@ CLARIFY = "clarify"
 NOT_CONNECTED = "not_connected"
 UNKNOWN = "unknown"
 COMMAND = "command"
+NEEDS_CONFIRMATION = "needs_confirmation"
 
 
 @dataclass
@@ -54,6 +57,10 @@ class Dispatcher:
         self.allowlist = Allowlist(config.allowed_user_ids)
         self.audit = audit_mod.AuditLog(config.audit_path)
         self.state = State(config.state_path)
+        # SQLite: очередь поручений, статусы, история, дескрипторы сессий.
+        self.store = store_db.Store(os.path.join(config.var_dir, "acc.db"))
+        for p in self.registry.all():
+            self.store.upsert_project(p.id, p.title, p.status)
 
     # -- публичный вход -----------------------------------------------------
     def handle(self, user_id, text: str) -> Response:
@@ -147,42 +154,69 @@ class Dispatcher:
                 ),
             )
 
-        # Проект подключён: формируем задачу и передаём адаптеру.
-        task = {
-            "id": uuid.uuid4().hex[:12],
-            "user_id": user_id,
-            "text": text,
-            "project": project.id,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        self.state.add_pending(task)
+        # Проект подключён. Опасное, но разрешённое действие требует подтверждения
+        # (аналог Plan Mode и подтверждения инструментов в Jarvis).
+        risk = check_risky(text)
+        if risk.risky:
+            db_task = self.store.enqueue_task(project.id, text, needs_confirmation=True)
+            self.store.record_event(
+                "task_awaiting_confirmation", project_id=project.id,
+                task_id=db_task["id"], detail=",".join(risk.categories),
+            )
+            self.audit.log(
+                "task_awaiting_confirmation", level=audit_mod.WARNING,
+                user_id=user_id, project=project.id, text=text,
+                task_id=db_task["id"], categories=risk.categories,
+            )
+            return Response(
+                type=NEEDS_CONFIRMATION,
+                project_id=project.id,
+                message=(
+                    f"Проект: «{project.title}».\nЭто опасное действие "
+                    f"({risk.human()}). Подтвердите: /confirm {db_task['id']} "
+                    f"или отмените: /reject {db_task['id']}."
+                ),
+                data={"task_id": db_task["id"], "categories": risk.categories},
+            )
 
+        # Обычное поручение: ставим в очередь и передаём адаптеру.
+        db_task = self.store.enqueue_task(project.id, text, needs_confirmation=False)
+        return self._deliver(user_id, project, db_task)
+
+    # -- доставка поручения агенту через адаптер ---------------------------
+    def _deliver(self, user_id, project, db_task: Dict) -> Response:
+        self.store.set_task_status(db_task["id"], store_db.PROCESSING)
+        task = {
+            "id": db_task["id"],
+            "user_id": user_id,
+            "text": db_task["text"],
+            "project": project.id,
+            "created_at": db_task.get("created_at"),
+        }
         adapter = build_adapter(
             project, cross_session_available=self.config.cross_session_available
         )
         delivery = adapter.deliver(project, task)
 
+        # Статус: доставленное поручение центр считает завершённым для себя,
+        # дальше его ведёт агент проекта; иначе оставляем в работе.
+        final_status = store_db.DONE if delivery.delivered else store_db.PROCESSING
+        self.store.set_task_status(db_task["id"], final_status, result=delivery.kind)
+        self.store.record_event(
+            "task_routed", project_id=project.id, task_id=db_task["id"],
+            detail=delivery.kind,
+        )
         self.audit.log(
-            "task_routed",
-            user_id=user_id,
-            project=project.id,
-            text=text,
-            task_id=task["id"],
-            delivered=delivery.delivered,
+            "task_routed", user_id=user_id, project=project.id,
+            task_id=db_task["id"], delivered=delivery.delivered,
             adapter_kind=delivery.kind,
         )
-
-        if delivery.delivered:
-            # Локально записанное поручение считаем завершённым для центра:
-            # дальше его ведёт агент проекта.
-            self.state.resolve_pending(task["id"])
-
         return Response(
             type=ROUTED,
             project_id=project.id,
             message=f"Проект: «{project.title}».\n{delivery.message}",
             data={
-                "task_id": task["id"],
+                "task_id": db_task["id"],
                 "adapter_kind": delivery.kind,
                 "delivered": delivery.delivered,
             },
@@ -204,15 +238,68 @@ class Dispatcher:
 
         if cmd == "/status":
             connected = self.registry.connected()
-            pending = self.state.pending_tasks()
+            active = [
+                t for t in self.store.list_tasks(limit=200)
+                if t["status"] in store_db.ACTIVE_STATUSES
+            ]
             msg = (
                 f"Проектов всего: {len(self.registry.all())}, "
                 f"подключено: {len(connected)}.\n"
-                f"Незавершённых задач: {len(pending)}.\n"
+                f"Активных задач: {len(active)}.\n"
                 f"Смещение Telegram: {self.state.telegram_offset}."
             )
             self.audit.log("cmd_status", user_id=user_id)
             return Response(type=COMMAND, message=msg)
+
+        if cmd == "/queue":
+            active = [
+                t for t in self.store.list_tasks(limit=200)
+                if t["status"] in store_db.ACTIVE_STATUSES
+            ]
+            if not active:
+                return Response(type=COMMAND, message="Очередь пуста.")
+            lines = ["Очередь:"]
+            for t in active[:20]:
+                lines.append(f"{t['id']} [{t['status']}] {t['project_id']}: {t['text'][:60]}")
+            return Response(type=COMMAND, message="\n".join(lines))
+
+        if cmd == "/history":
+            events = self.store.history(15)
+            if not events:
+                return Response(type=COMMAND, message="История пуста.")
+            lines = ["История:"]
+            for e in events:
+                lines.append(
+                    f"{e.get('ts','')} {e.get('event','')} "
+                    f"{e.get('project_id') or ''}".rstrip()
+                )
+            return Response(type=COMMAND, message="\n".join(lines))
+
+        if cmd in ("/confirm", "/reject"):
+            parts = text.split()
+            if len(parts) < 2:
+                return Response(type=COMMAND, message=f"Укажите id задачи: {cmd} <id>.")
+            task_id = parts[1]
+            task = self.store.get_task(task_id)
+            if not task:
+                return Response(type=COMMAND, message="Задача не найдена.")
+            if cmd == "/reject":
+                self.store.reject_task(task_id)
+                self.store.record_event("task_rejected", project_id=task["project_id"],
+                                        task_id=task_id)
+                self.audit.log("task_rejected", user_id=user_id, project=task["project_id"],
+                               task_id=task_id)
+                return Response(type=COMMAND, message="Отклонено.")
+            # /confirm
+            confirmed = self.store.confirm_task(task_id)
+            if not confirmed:
+                return Response(type=COMMAND, message="Нечего подтверждать (задача не ждёт подтверждения).")
+            project = self.registry.get(task["project_id"])
+            if project is None or not project.is_connected():
+                self.store.set_task_status(task_id, store_db.FAILED, result="project_unavailable")
+                return Response(type=COMMAND, message="Проект недоступен, задача не передана.")
+            self.audit.log("task_confirmed", user_id=user_id, project=project.id, task_id=task_id)
+            return self._deliver(user_id, project, self.store.get_task(task_id))
 
         if cmd == "/log":
             events = self.audit.tail(10)
@@ -232,7 +319,9 @@ class Dispatcher:
                 message=(
                     "Я центр управления вашими агентами.\n"
                     "Напишите обычным текстом задачу, я определю проект и передам её.\n"
-                    "Команды: /projects, /status, /log, /help."
+                    "Опасные действия спрошу подтвердить.\n"
+                    "Команды: /projects, /status, /queue, /history, /log, "
+                    "/confirm <id>, /reject <id>, /help."
                 ),
             )
 
