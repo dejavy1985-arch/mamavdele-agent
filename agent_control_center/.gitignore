@@ -1,0 +1,14 @@
+# Рабочее состояние и журналы центра (создаются во время работы).
+var/
+
+# Реальный конфиг с вашим user_id (шаблон лежит рядом: control_center.example.json).
+config/control_center.json
+
+# Поручения, память и любые рабочие данные домиков.
+homes/*/inbox/
+homes/*/memory/*
+!homes/*/memory/.gitkeep
+
+# Python
+__pycache__/
+*.pyc

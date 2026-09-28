@@ -1,0 +1,10 @@
+{
+  "_comment": "Скопируйте этот файл в control_center.json и впишите свой Telegram user_id. Токен бота храните в переменной окружения, не здесь.",
+  "homes_dir": "homes",
+  "var_dir": "var",
+  "allowed_user_ids": [
+    123456789
+  ],
+  "cross_session_available": false,
+  "telegram_token_env": "ACC_TELEGRAM_BOT_TOKEN"
+}
