@@ -60,6 +60,7 @@ class TrialTests(unittest.TestCase):
             fh.write(f"ANTHROPIC_API_KEY={KEY}\n")
         with open(REPO_MANIFEST, encoding="utf-8") as fh:
             manifest = json.load(fh)
+        manifest["adapter"].pop("pass_env", None)  # доступ только через ключ домика
         manifest["adapter"]["claude_bin"] = self.claude
         with open(os.path.join(self.home, "manifest.json"), "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, ensure_ascii=False)
