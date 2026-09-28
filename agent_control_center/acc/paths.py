@@ -32,11 +32,14 @@ def _real(path: str) -> str:
 
 def _is_within(root_real: str, target_real: str) -> bool:
     """True, если target_real это сам корень или лежит строго внутри него."""
-    if target_real == root_real:
+    # normcase: на Windows регистр букв в путях не важен (на Linux ничего не меняет).
+    root_c = os.path.normcase(root_real)
+    target_c = os.path.normcase(target_real)
+    if target_c == root_c:
         return True
     # Сравниваем по границе разделителя, чтобы /home/app-secret не считался
     # находящимся внутри /home/app.
-    return target_real.startswith(root_real + os.sep)
+    return target_c.startswith(root_c + os.sep)
 
 
 def safe_resolve(home_root: str, relpath: str) -> str:
@@ -56,8 +59,14 @@ def safe_resolve(home_root: str, relpath: str) -> str:
         raise PathEscapeError("Путь содержит нулевой байт")
 
     # Абсолютные пути запрещены: домик всегда адресуется относительно себя.
-    if os.path.isabs(relpath):
+    # Проверяем явно, а не только через os.path.isabs: в Python 3.13 на Windows
+    # "/etc/x" и "\Windows\x" перестали считаться абсолютными.
+    if os.path.isabs(relpath) or relpath.startswith(("/", "\\")):
         raise PathEscapeError(f"Абсолютные пути запрещены: {relpath!r}")
+
+    # Двоеточие: буква диска ("C:\...", "C:foo") или скрытый поток NTFS ("a.txt:x").
+    if ":" in relpath:
+        raise PathEscapeError(f"Двоеточие в пути запрещено: {relpath!r}")
 
     # Домашний тильда-префикс раскрылся бы в чужую директорию.
     if relpath.startswith("~"):
@@ -67,6 +76,10 @@ def safe_resolve(home_root: str, relpath: str) -> str:
     parts = [p for p in relpath.replace("\\", "/").split("/") if p not in ("", ".")]
     if any(p == ".." for p in parts):
         raise PathEscapeError(f"Переход вверх ('..') запрещён: {relpath!r}")
+
+    # Windows отбрасывает точки и пробелы в конце имени: ".. " там превращается в "..".
+    if any(p != p.rstrip(". ") for p in parts):
+        raise PathEscapeError(f"Имя с точкой или пробелом в конце запрещено: {relpath!r}")
 
     root_real = _real(home_root)
     target = os.path.join(root_real, *parts) if parts else root_real

@@ -1,0 +1,26 @@
+# Пример службы systemd для Linux-сервера (VPS).
+# Замените USER и путь на свои, затем:
+#   sudo cp deploy/acc.service /etc/systemd/system/acc.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now acc
+# Служба стартует при загрузке сервера и перезапускается после падения.
+# Журнал службы: journalctl -u acc -f
+
+[Unit]
+Description=agent_control_center (Telegram центр управления агентами)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=USER
+WorkingDirectory=/home/USER/agent_control_center
+ExecStart=/usr/bin/python3 -m acc.telegram_bot config/control_center.json
+Restart=always
+RestartSec=5
+# Токен лучше хранить в config/telegram_token.txt (chmod 600).
+# Либо раскомментируйте строку ниже (файл службы тогда тоже секрет):
+# Environment=ACC_TELEGRAM_BOT_TOKEN=ваш_токен
+
+[Install]
+WantedBy=multi-user.target

@@ -32,7 +32,11 @@ cd agent_control_center
 python3 tests/run_tests.py
 ```
 
-Ожидаемо: 76 тестов, все проходят. Сторонние пакеты не нужны, только Python 3.10+.
+Ожидаемо: 87 тестов, все проходят (проверено на Python 3.10, 3.11, 3.12, 3.13).
+Сторонние пакеты не нужны, только Python 3.10+.
+
+**Где запускать:** основной путь это Linux-сервер, см. `DEPLOY_SERVER.md`.
+Windows-скрипты (`INSTALL_WINDOWS.md`) нужны только для проверки на своём ПК.
 
 ## Домики сейчас
 
@@ -54,6 +58,7 @@ python3 -m acc.cli route "сделай выгрузку"    # какой про�
 python3 -m acc.cli send --user 111 "текст"    # полный прогон через диспетчер
 python3 -m acc.cli queue                      # очередь поручений
 python3 -m acc.cli history                    # история событий
+python3 -m acc.cli recover                    # подхватить прерванные поручения
 python3 -m acc.cli demo                        # прогон на ВРЕМЕННЫХ тест-проектах
 ```
 

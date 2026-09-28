@@ -20,6 +20,20 @@ from acc.paths import (  # noqa: E402
 )
 
 
+def _symlinks_supported() -> bool:
+    """На Windows без режима разработчика создание симлинков запрещено (WinError 1314)."""
+    tmp = tempfile.mkdtemp()
+    try:
+        os.symlink(tmp, os.path.join(tmp, "probe"), target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+SYMLINKS = _symlinks_supported()
+NO_SYMLINKS_REASON = "система не разрешает создавать символические ссылки"
+
+
 class SafeResolveTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -54,22 +68,42 @@ class SafeResolveTests(unittest.TestCase):
         with self.assertRaises(PathEscapeError):
             safe_resolve(self.home, "memory/\x00evil")
 
+    @unittest.skipUnless(SYMLINKS, NO_SYMLINKS_REASON)
     def test_symlink_escape_rejected(self):
-        # Симлинк внутри домика, ведущий наружу (в /etc), должен быть отклонён.
+        # Симлинк внутри домика, ведущий наружу (в чужую папку), должен быть отклонён.
+        outside = tempfile.mkdtemp()
+        with open(os.path.join(outside, "passwd"), "w") as fh:
+            fh.write("x")
         link = os.path.join(self.home, "escape")
-        os.symlink("/etc", link)
+        os.symlink(outside, link, target_is_directory=True)
         with self.assertRaises(PathEscapeError):
             safe_resolve(self.home, "escape/passwd")
 
+    @unittest.skipUnless(SYMLINKS, NO_SYMLINKS_REASON)
     def test_symlink_to_sibling_home_rejected(self):
         sibling = os.path.join(self.tmp, "projectB")
         os.makedirs(sibling)
         with open(os.path.join(sibling, "secret.txt"), "w") as fh:
             fh.write("top secret")
         link = os.path.join(self.home, "peek")
-        os.symlink(sibling, link)
+        os.symlink(sibling, link, target_is_directory=True)
         with self.assertRaises(PathEscapeError):
             safe_resolve(self.home, "peek/secret.txt")
+
+    def test_windows_style_escapes_rejected(self):
+        # Эти формы должны отклоняться на любой ОС и любой версии Python.
+        for attempt in [
+            "\\Windows\\win.ini",          # от корня диска (в Python 3.13 не isabs)
+            "C:\\Windows\\win.ini",        # буква диска
+            "C:foo",                        # путь относительно диска
+            "\\\\server\\share\\x",        # сетевой путь UNC
+            "memory/notes.txt:hidden",     # скрытый поток NTFS
+            "..\\projectB\\secret.txt",    # переход вверх с обратной косой
+            ".. /projectB/secret.txt",     # ".. " Windows превращает в ".."
+            "memory/.../x",                 # "..." тоже нормализуется Windows
+        ]:
+            with self.assertRaises(PathEscapeError, msg=attempt):
+                safe_resolve(self.home, attempt)
 
     def test_sibling_prefix_not_treated_as_inside(self):
         # projectA-extra не должен считаться внутри projectA.
@@ -102,10 +136,11 @@ class ProjectSandboxTests(unittest.TestCase):
             with self.assertRaises(PathEscapeError):
                 self.sbA.read_text(attempt)
 
+    @unittest.skipUnless(SYMLINKS, NO_SYMLINKS_REASON)
     def test_write_through_symlink_refused(self):
         outside = os.path.join(self.tmp, "outside")
         os.makedirs(outside)
-        os.symlink(outside, os.path.join(self.homeA, "out"))
+        os.symlink(outside, os.path.join(self.homeA, "out"), target_is_directory=True)
         with self.assertRaises(PathEscapeError):
             self.sbA.write_text("out/pwned.txt", "x")
 

@@ -10,6 +10,7 @@
     python -m acc.cli send --user 111 "текст"   # полный прогон через диспетчер
     python -m acc.cli queue            # очередь поручений
     python -m acc.cli history          # история событий
+    python -m acc.cli recover          # подхватить прерванные поручения
     python -m acc.cli add-home ID --title "..." --keywords a,b --aliases x,y
     python -m acc.cli demo             # демо на ВРЕМЕННЫХ тестовых проектах
 
@@ -126,6 +127,18 @@ def cmd_history(args) -> int:
     dispatcher = Dispatcher(config)
     for e in dispatcher.store.history(30):
         _print(f"{e.get('ts','')} {e.get('event','')} {e.get('project_id') or ''}".rstrip())
+    return 0
+
+
+def cmd_recover(args) -> int:
+    config = load_config(_resolve_config(args.config))
+    dispatcher = Dispatcher(config)
+    counts = dispatcher.recover_after_restart()
+    _print(
+        "Восстановление: передано заново {redelivered}, прервано и помечено failed "
+        "{interrupted}, проект недоступен {unavailable}.".format(**counts)
+    )
+    dispatcher.store.close()
     return 0
 
 
@@ -246,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("queue", help="очередь поручений").set_defaults(func=cmd_queue)
     sub.add_parser("history", help="история событий").set_defaults(func=cmd_history)
+    sub.add_parser("recover", help="подхватить прерванные поручения").set_defaults(func=cmd_recover)
 
     pa = sub.add_parser("add-home", help="добавить домик (без правки ядра)")
     pa.add_argument("id")

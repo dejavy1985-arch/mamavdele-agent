@@ -14,16 +14,15 @@
 
 from __future__ import annotations
 
+import json
 import os
-import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from . import audit as audit_mod
 from . import router as router_mod
 from . import store_db
-from .adapters import build_adapter
+from .adapters import HANDOFF_READY, build_adapter
 from .config import ControlCenterConfig
 from .guardrails import check_boundaries, check_risky
 from .registry import Registry
@@ -39,6 +38,7 @@ NOT_CONNECTED = "not_connected"
 UNKNOWN = "unknown"
 COMMAND = "command"
 NEEDS_CONFIRMATION = "needs_confirmation"
+ERROR = "error"
 
 
 @dataclass
@@ -61,6 +61,43 @@ class Dispatcher:
         self.store = store_db.Store(os.path.join(config.var_dir, "acc.db"))
         for p in self.registry.all():
             self.store.upsert_project(p.id, p.title, p.status)
+
+    # -- восстановление после перезапуска -----------------------------------
+    def recover_after_restart(self) -> Dict[str, int]:
+        """Подхватить поручения, прерванные падением или перезапуском.
+
+        - queued: поручение принято, но не успело уйти агенту. Передаём сейчас.
+        - processing без результата: передача оборвалась на середине, неизвестно,
+          дошло ли поручение. Не дублируем, а честно помечаем failed.
+        - awaiting_confirmation: ничего не делаем, их можно подтвердить и после
+          перезапуска (/confirm).
+        Вызывается явно при старте бота и командой `python -m acc.cli recover`.
+        """
+        counts = {"redelivered": 0, "interrupted": 0, "unavailable": 0}
+
+        for t in self.store.list_tasks(status=store_db.PROCESSING, limit=1000):
+            if t.get("result") is None:
+                self.store.set_task_status(t["id"], store_db.FAILED,
+                                           result="interrupted_by_restart")
+                self.store.record_event("task_interrupted", level="warning",
+                                        project_id=t["project_id"], task_id=t["id"])
+                counts["interrupted"] += 1
+
+        queued = self.store.list_tasks(status=store_db.QUEUED, limit=1000)
+        for t in sorted(queued, key=lambda x: x["created_at"] or ""):
+            project = self.registry.get(t["project_id"])
+            if project is None or not project.is_connected():
+                self.store.set_task_status(t["id"], store_db.FAILED,
+                                           result="project_unavailable")
+                counts["unavailable"] += 1
+                continue
+            self._deliver(None, project, t)
+            counts["redelivered"] += 1
+
+        self.store.record_event("recovered_after_restart",
+                                detail=json.dumps(counts, ensure_ascii=False))
+        self.audit.log("recovered_after_restart", **counts)
+        return counts
 
     # -- публичный вход -----------------------------------------------------
     def handle(self, user_id, text: str) -> Response:
@@ -196,11 +233,30 @@ class Dispatcher:
         adapter = build_adapter(
             project, cross_session_available=self.config.cross_session_available
         )
-        delivery = adapter.deliver(project, task)
+        try:
+            delivery = adapter.deliver(project, task)
+        except Exception as exc:  # ошибка доставки не должна оставлять задачу зависшей
+            self.store.set_task_status(db_task["id"], store_db.FAILED, result=f"error: {exc}")
+            self.store.record_event("task_failed", level="error", project_id=project.id,
+                                    task_id=db_task["id"], detail=str(exc)[:300])
+            self.audit.log("task_failed", level=audit_mod.ERROR, user_id=user_id,
+                           project=project.id, task_id=db_task["id"], error=str(exc)[:300])
+            return Response(
+                type=ERROR,
+                project_id=project.id,
+                message="Не удалось передать поручение. Ошибка записана в журнал.",
+                data={"task_id": db_task["id"]},
+            )
 
-        # Статус: доставленное поручение центр считает завершённым для себя,
-        # дальше его ведёт агент проекта; иначе оставляем в работе.
-        final_status = store_db.DONE if delivery.delivered else store_db.PROCESSING
+        # Итоговый статус: доставлено -> done; готово к передаче в живую сессию ->
+        # остаётся processing (ждёт подтверждения доставки); иначе failed, чтобы
+        # недоставленная задача не висела в очереди как "выполняется".
+        if delivery.delivered:
+            final_status = store_db.DONE
+        elif delivery.kind == HANDOFF_READY:
+            final_status = store_db.PROCESSING
+        else:
+            final_status = store_db.FAILED
         self.store.set_task_status(db_task["id"], final_status, result=delivery.kind)
         self.store.record_event(
             "task_routed", project_id=project.id, task_id=db_task["id"],
@@ -284,7 +340,11 @@ class Dispatcher:
             if not task:
                 return Response(type=COMMAND, message="Задача не найдена.")
             if cmd == "/reject":
-                self.store.reject_task(task_id)
+                if not self.store.reject_task(task_id):
+                    return Response(
+                        type=COMMAND,
+                        message=f"Отклонить нельзя: задача уже в статусе {task['status']}.",
+                    )
                 self.store.record_event("task_rejected", project_id=task["project_id"],
                                         task_id=task_id)
                 self.audit.log("task_rejected", user_id=user_id, project=task["project_id"],
