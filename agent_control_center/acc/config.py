@@ -32,15 +32,12 @@ class ControlCenterConfig:
 
     def telegram_token(self):
         # Сначала переменная окружения, затем локальный файл (для Windows без export).
-        # Файл config/telegram_token.txt не попадает в git (см. .gitignore).
+        # Файлы токена не попадают в git (см. .gitignore). base_dir это корень проекта.
         env_token = os.environ.get(self.telegram_token_env)
         if env_token:
             return env_token.strip()
-        token_file = os.path.join(self.base_dir, "config", "telegram_token.txt")
-        # base_dir это папка, где лежит control_center.json (обычно .../config),
-        # поэтому проверяем и рядом с конфигом, и в подпапке config.
         candidates = [
-            token_file,
+            os.path.join(self.base_dir, "config", "telegram_token.txt"),
             os.path.join(self.base_dir, "telegram_token.txt"),
         ]
         for path in candidates:
@@ -56,14 +53,26 @@ class ControlCenterConfig:
 
 
 def load_config(config_path: str) -> ControlCenterConfig:
-    base_dir = os.path.dirname(os.path.abspath(config_path))
+    """Загрузить конфиг. Пути homes/var считаются от КОРНЯ проекта, а не от папки
+    config/, поэтому проект можно перенести в любую папку без правок кода."""
+    config_path = os.path.abspath(config_path)
+    config_dir = os.path.dirname(config_path)
+    # Если конфиг лежит в папке config/, корень проекта это её родитель.
+    if os.path.basename(config_dir) == "config":
+        base_dir = os.path.dirname(config_dir)
+    else:
+        base_dir = config_dir
+
     data = {}
     if os.path.exists(config_path):
         with open(config_path, encoding="utf-8") as fh:
             data = json.load(fh)
 
-    homes_dir = os.path.join(base_dir, data.get("homes_dir", "homes"))
-    var_dir = os.path.join(base_dir, data.get("var_dir", "var"))
+    def _resolve(rel: str) -> str:
+        return rel if os.path.isabs(rel) else os.path.join(base_dir, rel)
+
+    homes_dir = _resolve(data.get("homes_dir", "homes"))
+    var_dir = _resolve(data.get("var_dir", "var"))
     os.makedirs(var_dir, exist_ok=True)
 
     return ControlCenterConfig(

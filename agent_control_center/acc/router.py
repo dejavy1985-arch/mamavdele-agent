@@ -48,6 +48,13 @@ def _tokenize(text: str) -> List[str]:
     return re.findall(r"[\w]+", (text or "").lower(), flags=re.UNICODE)
 
 
+def _stem(word: str) -> str:
+    """Грубая основа слова: первые 5 символов. Ловит словоформы без словаря
+    (картинка/картинку -> карти, отчёт/отчёты -> отчёт). Применяется только к
+    словам длиной от 4 символов, чтобы короткие слова не совпадали случайно."""
+    return word[:5]
+
+
 def score_project(text: str, tokens: List[str], project: Project) -> RouteCandidate:
     text_l = (text or "").lower()
     hits: List[str] = []
@@ -64,8 +71,10 @@ def score_project(text: str, tokens: List[str], project: Project) -> RouteCandid
         score += 5
         hits.append(project.id.lower())
 
-    # Ключевые слова: точное совпадение токена или вхождение фразы.
+    # Ключевые слова: фраза по вхождению; слово по точному совпадению токена или
+    # по основе (словоформы). Основа применяется только к словам длиной от 4.
     token_set = set(tokens)
+    token_stems = {_stem(t) for t in tokens if len(t) >= 4}
     for kw in project.keywords:
         if not kw:
             continue
@@ -74,6 +83,9 @@ def score_project(text: str, tokens: List[str], project: Project) -> RouteCandid
                 score += 2
                 hits.append(kw)
         elif kw in token_set:
+            score += 2
+            hits.append(kw)
+        elif len(kw) >= 4 and _stem(kw) in token_stems:
             score += 2
             hits.append(kw)
 

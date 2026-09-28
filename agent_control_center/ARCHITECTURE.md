@@ -73,6 +73,7 @@ sandbox всеми способами. Все проходят.
 | `store_db.py` | SQLite: очередь поручений, статусы, история, дескриптор сессии |
 | `adapters.py` | доставка задачи агенту проекта (manual / cross_session) |
 | `dispatcher.py` | связывает всё: allowlist, команды, границы, подтверждение, маршрут, очередь, журнал |
+| `cli.py` | офлайн-инструменты без Telegram: doctor, route, send, queue, history, add-home, demo |
 | `telegram_bot.py` | локальный транспорт Telegram (long polling, stdlib) |
 
 ## 5. Маршрутизация и уточнение

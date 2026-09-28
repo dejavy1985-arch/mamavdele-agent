@@ -33,6 +33,12 @@ class RouterTests(unittest.TestCase):
         r = router.route("привет, как дела", self.projects)
         self.assertEqual(r.outcome, router.UNKNOWN)
 
+    def test_wordform_matched_by_stem(self):
+        # "комментарии" (форма) должно находить ключевое слово "комментарий".
+        r = router.route("посмотри комментарии в инстаграме", self.projects)
+        self.assertEqual(r.outcome, router.MATCH)
+        self.assertEqual(r.best.project_id, "mamavdele-agent")
+
     def test_ambiguous_when_both_mentioned_equally(self):
         # По одному ключевому слову на каждый проект -> равный счёт -> уточнение.
         r = router.route("комментарий и видео", self.projects)
