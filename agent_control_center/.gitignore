@@ -16,3 +16,12 @@ homes/*/memory/*
 # Python
 __pycache__/
 *.pyc
+
+# Рабочие данные агентов внутри домиков (результаты, журналы, их HOME-настройки).
+homes/*/results/
+homes/*/tmp/
+homes/*/runs.log
+homes/*/notes.txt
+homes/*/.claude/
+homes/*/.claude.json
+homes/*/.cache/

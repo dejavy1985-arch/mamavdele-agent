@@ -1,19 +1,19 @@
 {
   "id": "example-template",
   "title": "Пример-шаблон домика (не реальный агент)",
-  "summary": "Это образец манифеста, а не подключённый проект. По нему видно формат домика: заголовок, ключевые слова, псевдонимы, адаптер, статус. Реальный второй проект добавим после проверки папок на вашем компьютере, выбор за вами.",
+  "summary": "Образец манифеста для реального агента на Claude Code. Не подключён. Чтобы подключить свой проект: скопируйте папку, поменяйте id, заголовок и ключевые слова, положите ключ ANTHROPIC_API_KEY в secrets/agent.env и смените статус на connected.",
   "status": "registered",
-  "keywords": ["пример", "шаблон", "example", "template", "демо"],
+  "keywords": ["пример", "шаблон", "example", "template"],
   "aliases": ["пример", "шаблон"],
   "adapter": {
-    "type": "manual",
-    "notes": "manual = поручение записывается в inbox домика. Живой запуск агента это локальный шаг."
+    "type": "claude_code",
+    "permission_mode": "acceptEdits",
+    "max_turns": 30,
+    "timeout_sec": 1800,
+    "sandbox": "required",
+    "network": true,
+    "continue_session": true
   },
-  "planned_adapter": {
-    "type": "cross_session",
-    "target_session_name": "ИМЯ_СЕССИИ_ПОДТВЕРДИТЬ_ЛОКАЛЬНО",
-    "requires": ["локальный запуск", "Remote Control", "онлайн-сессия проекта"]
-  },
-  "allowed_actions": ["status", "route_task", "read_memory", "append_memory"],
+  "allowed_actions": ["status", "route_task"],
   "boundaries_note": "Центр не публикует, не пишет клиентам, не платит, не меняет токены и настройки агентов."
 }

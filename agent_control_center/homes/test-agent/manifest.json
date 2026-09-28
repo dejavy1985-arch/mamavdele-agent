@@ -1,0 +1,18 @@
+{
+  "id": "test-agent",
+  "title": "Тестовый агент (не реальный проект)",
+  "summary": "Проверочный агент без ИИ. Реально выполняет простые команды в своей папке, чтобы проверить путь: задача в Telegram, выполнение агентом, результат в тот же чат. Ваших агентов не касается.",
+  "status": "connected",
+  "test": true,
+  "keywords": ["тест", "тестовый"],
+  "aliases": ["тестовый агент", "test-agent"],
+  "adapter": {
+    "type": "process",
+    "command": ["{python}", "agent.py"],
+    "timeout_sec": 120,
+    "sandbox": "preferred",
+    "network": false
+  },
+  "allowed_actions": ["status", "route_task"],
+  "boundaries_note": "Тестовый агент не публикует, не пишет клиентам, не платит, не меняет токены."
+}

@@ -56,3 +56,34 @@ def build_center(manifests=None, allowed_user_ids=(111,), cross_session_availabl
         cross_session_available=cross_session_available,
     )
     return config, base
+
+
+# -- домики с настоящим тестовым агентом --------------------------------------
+import shutil  # noqa: E402
+
+PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+AGENT_SRC = os.path.join(PKG_ROOT, "homes", "test-agent", "agent.py")
+
+
+def make_agent_home(homes_dir, pid, keywords=None, title=None, sandbox="preferred",
+                    adapter_extra=None, status="connected"):
+    """Временный домик, где работает настоящий тестовый агент (процесс, не ИИ)."""
+    home = os.path.join(homes_dir, pid)
+    os.makedirs(os.path.join(home, "secrets"), exist_ok=True)
+    shutil.copy(AGENT_SRC, os.path.join(home, "agent.py"))
+    adapter = {"type": "process", "command": ["{python}", "agent.py"],
+               "sandbox": sandbox, "network": False, "timeout_sec": 30}
+    adapter.update(adapter_extra or {})
+    with open(os.path.join(home, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump({"id": pid, "title": title or pid, "status": status, "test": True,
+                   "keywords": keywords or [pid], "adapter": adapter}, fh, ensure_ascii=False)
+    return home
+
+
+def build_agent_center(agents, allowed_user_ids=(111,), max_parallel=2):
+    """Центр с временными домиками-агентами. agents: [(id, [ключевые слова]), ...]."""
+    config, base = build_center(manifests=[], allowed_user_ids=allowed_user_ids)
+    for pid, keywords in agents:
+        make_agent_home(config.homes_dir, pid, keywords)
+    config.max_parallel = max_parallel
+    return config, base

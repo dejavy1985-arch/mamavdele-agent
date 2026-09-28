@@ -21,6 +21,7 @@ class ControlCenterConfig:
     allowed_user_ids: List[int] = field(default_factory=list)
     cross_session_available: bool = False
     telegram_token_env: str = "ACC_TELEGRAM_BOT_TOKEN"
+    max_parallel: int = 2  # сколько агентов разных проектов работают одновременно
 
     @property
     def audit_path(self) -> str:
@@ -82,4 +83,5 @@ def load_config(config_path: str) -> ControlCenterConfig:
         allowed_user_ids=list(data.get("allowed_user_ids", [])),
         cross_session_available=bool(data.get("cross_session_available", False)),
         telegram_token_env=data.get("telegram_token_env", "ACC_TELEGRAM_BOT_TOKEN"),
+        max_parallel=int(data.get("max_parallel", 2)),
     )

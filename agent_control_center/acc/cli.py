@@ -7,16 +7,18 @@
     python -m acc.cli doctor           # самопроверка конфига и домиков
     python -m acc.cli projects         # список домиков и статусов
     python -m acc.cli route "текст"    # сухой прогон: какой проект выбран
-    python -m acc.cli send --user 111 "текст"   # полный прогон через диспетчер
+    python -m acc.cli ask "текст"      # полный путь без Telegram: агент выполняет задачу
+    python -m acc.cli ask --project test-agent "переверни привет"
+    python -m acc.cli send --user 111 "текст"   # то же, но с проверкой allowlist
     python -m acc.cli queue            # очередь поручений
     python -m acc.cli history          # история событий
     python -m acc.cli recover          # подхватить прерванные поручения
     python -m acc.cli add-home ID --title "..." --keywords a,b --aliases x,y
     python -m acc.cli demo             # демо на ВРЕМЕННЫХ тестовых проектах
 
-Команда demo создаёт временные тестовые проекты в отдельной папке, показывает
-весь путь (маршрут, уточнение, подтверждение, изоляция) и удаляет их. Она НЕ
-трогает реальные домики и НЕ называет их подключёнными.
+Команда demo создаёт два ВРЕМЕННЫХ тестовых домика с настоящим тестовым агентом,
+показывает весь путь (маршрут, уточнение, подтверждение, выполнение, результат,
+изоляция) и удаляет их. Реальные домики не трогает.
 """
 
 from __future__ import annotations
@@ -29,8 +31,9 @@ import tempfile
 
 from . import router as router_mod
 from .config import ControlCenterConfig, load_config
-from .dispatcher import Dispatcher
+from .dispatcher import ACCEPTED, Dispatcher
 from .registry import Registry
+from .worker import Worker
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(PROJECT_ROOT, "config", "control_center.json")
@@ -101,13 +104,38 @@ def cmd_route(args) -> int:
     return 0
 
 
+def _run_and_print(config, user, text, project_id=None, trusted=False, timeout=300) -> int:
+    """Полный путь без Telegram: всё, что пришло бы в чат, печатается сюда."""
+    d = Dispatcher(config)
+    w = Worker(d, notifier=lambda chat_id, t, reply_to=None: _print(t + "\n"),
+               max_parallel=config.max_parallel)
+    try:
+        r = d.handle(user, text, trusted=trusted, project_id=project_id)
+        if r.silent:
+            _print("(сообщение отклонено: отправителя нет в allowlist)")
+            return 1
+        _print(r.message + "\n")
+        if r.type != ACCEPTED:
+            return 0 if r.type in ("command", "needs_confirmation", "clarify") else 1
+        if not w.run_until_idle(timeout):
+            _print("Задача не закончилась за отведённое время.")
+            return 1
+        task = d.store.get_task(r.data["task_id"])
+        return 0 if task and task["status"] == "done" else 1
+    finally:
+        w.stop()
+        d.store.close()
+
+
+def cmd_ask(args) -> int:
+    config = load_config(_resolve_config(args.config))
+    return _run_and_print(config, "cli", args.text, project_id=args.project, trusted=True,
+                          timeout=args.timeout)
+
+
 def cmd_send(args) -> int:
     config = load_config(_resolve_config(args.config))
-    dispatcher = Dispatcher(config)
-    response = dispatcher.handle(args.user, args.text)
-    _print(f"Тип ответа: {response.type}")
-    _print(response.message)
-    return 0
+    return _run_and_print(config, args.user, args.text, timeout=args.timeout)
 
 
 def cmd_queue(args) -> int:
@@ -132,13 +160,16 @@ def cmd_history(args) -> int:
 
 def cmd_recover(args) -> int:
     config = load_config(_resolve_config(args.config))
-    dispatcher = Dispatcher(config)
-    counts = dispatcher.recover_after_restart()
-    _print(
-        "Восстановление: передано заново {redelivered}, прервано и помечено failed "
-        "{interrupted}, проект недоступен {unavailable}.".format(**counts)
-    )
-    dispatcher.store.close()
+    d = Dispatcher(config)
+    counts = d.recover_after_restart()
+    _print("Восстановление: прервано перезапуском {interrupted}, ждут выполнения "
+           "{resumed}, ждут подтверждения {awaiting}.".format(**counts))
+    if counts["resumed"]:
+        w = Worker(d, notifier=lambda c, t, r=None: _print(t + "\n"),
+                   max_parallel=config.max_parallel)
+        w.run_until_idle(600)
+        w.stop()
+    d.store.close()
     return 0
 
 
@@ -175,68 +206,67 @@ def cmd_add_home(args) -> int:
 
 
 def cmd_demo(args) -> int:
-    """Полный прогон на ВРЕМЕННЫХ тестовых проектах (не реальные домики)."""
+    """Полный прогон на ВРЕМЕННЫХ тестовых домиках с настоящим тестовым агентом."""
+    import shutil
+    from .runner import sandbox_available
+
+    agent_src = os.path.join(HOMES_DIR, "test-agent", "agent.py")
     base = tempfile.mkdtemp(prefix="acc-demo-")
     homes = os.path.join(base, "homes")
     var = os.path.join(base, "var")
-    os.makedirs(homes)
     os.makedirs(var)
 
-    def make(pid, title, keywords, aliases):
-        d = os.path.join(homes, pid)
-        os.makedirs(d)
-        with open(os.path.join(d, "manifest.json"), "w", encoding="utf-8") as fh:
-            json.dump(
-                {
-                    "id": pid, "title": title, "status": "connected",
-                    "keywords": keywords, "aliases": aliases,
-                    "adapter": {"type": "manual"},
-                },
-                fh, ensure_ascii=False,
-            )
+    def make(pid, title, keywords):
+        home = os.path.join(homes, pid)
+        os.makedirs(os.path.join(home, "secrets"))
+        shutil.copy(agent_src, os.path.join(home, "agent.py"))
+        with open(os.path.join(home, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump({"id": pid, "title": title, "status": "connected", "test": True,
+                       "keywords": keywords,
+                       "adapter": {"type": "process", "command": ["{python}", "agent.py"],
+                                   "sandbox": "preferred", "network": False,
+                                   "timeout_sec": 60}}, fh, ensure_ascii=False)
+        return home
 
-    # Два ВРЕМЕННЫХ тестовых проекта (только для демо, не ваши реальные).
-    make("test-alpha", "Тест Альфа", ["альфа", "отчёт", "выгрузка"], ["alpha"])
-    make("test-beta", "Тест Бета", ["бета", "картинка", "рендер"], ["beta"])
+    make("test-alpha", "Тест Альфа", ["альфа"])
+    beta = make("test-beta", "Тест Бета", ["бета"])
+    secret = os.path.join(beta, "secrets", "key.txt")
+    with open(secret, "w", encoding="utf-8") as fh:
+        fh.write("СЕКРЕТ-БЕТЫ")
 
-    config = ControlCenterConfig(
-        base_dir=base, homes_dir=homes, var_dir=var, allowed_user_ids=[111]
-    )
+    config = ControlCenterConfig(base_dir=base, homes_dir=homes, var_dir=var,
+                                 allowed_user_ids=[111])
     d = Dispatcher(config)
-
+    chat = []
+    w = Worker(d, notifier=lambda c, t, r=None: chat.append(t))
     scenario = [
-        (999, "сделай отчёт по альфе"),        # чужой -> тихий отказ
-        (111, "сделай отчёт по альфе"),        # -> test-alpha
-        (111, "отрендерь картинку в бете"),    # -> test-beta
-        (111, "отчёт и картинка"),             # -> уточнение
-        (111, "опубликуй пост"),               # -> граница этапа 1
-        (111, "удали отчёт в альфе"),          # -> нужно подтверждение
-        (111, "погода завтра"),                # -> не понял
+        (999, "альфа: переверни привет"),                 # чужой: тихий отказ
+        (111, "альфа: переверни привет"),                 # выполнит альфа
+        (111, "бета: посчитай слова раз два три"),        # выполнит бета
+        (111, "альфа и бета"),                             # уточнение
+        (111, "опубликуй пост"),                           # граница этапа 1
+        (111, "альфа: удали отчёт"),                       # нужно подтверждение
+        # Агент АЛЬФЫ (проект выбран явно) пытается прочитать секрет беты.
+        (111, f"/to test-alpha прочитай {secret}"),
     ]
-    _print("ДЕМО на ВРЕМЕННЫХ тестовых проектах (test-alpha, test-beta).")
-    _print("Это не ваши реальные домики. По завершении всё удаляется.\n")
+    _print("ДЕМО на ВРЕМЕННЫХ тестовых домиках (test-alpha, test-beta) с настоящим тестовым агентом.")
+    _print("Это не ваши реальные проекты. По завершении всё удаляется.\n")
     for uid, text in scenario:
-        r = d.handle(uid, text)
+        r = d.handle(uid, text, chat_id=uid)
         first = r.message.splitlines()[0] if r.message else ""
         _print(f"[user {uid}] {text!r}\n   -> {r.type}: {first}")
-
-    # Проверка изоляции по содержимому: поручение по альфе лежит только в своём
-    # домике и НЕ утекает в соседний домик beta.
-    def _read(p):
-        return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
-
-    alpha_text = _read(os.path.join(homes, "test-alpha", "inbox", "tasks.jsonl"))
-    beta_text = _read(os.path.join(homes, "test-beta", "inbox", "tasks.jsonl"))
-    own_ok = "альф" in alpha_text
-    cross_leak = "альф" in beta_text
+    w.run_until_idle(60)
+    w.stop()
+    _print("\nЧто пришло в чат от агентов:")
+    for t in chat:
+        _print("   " + t.replace("\n\n", " | ").replace("\n", " "))
+    leaked = any("Тест Альфа" in t and "СЕКРЕТ-БЕТЫ" in t for t in chat)
     _print("\nИзоляция домиков:")
-    _print(f"   поручение по альфе лежит в test-alpha: {own_ok}")
-    _print(f"   в test-beta чужого поручения нет: {not cross_leak}")
-
+    _print(f"   песочница bubblewrap: {'включена' if sandbox_available() else 'недоступна'}")
+    _print(f"   агент альфы прочитал секрет беты: {'ДА, изоляции нет' if leaked else 'нет'}")
     d.store.close()
-    import shutil
     shutil.rmtree(base, ignore_errors=True)
-    _print("\nВременные проекты удалены. Реальные домики не затронуты.")
+    _print("\nВременные домики удалены. Реальные домики не затронуты.")
     return 0
 
 
@@ -252,14 +282,21 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("text")
     pr.set_defaults(func=cmd_route)
 
-    ps = sub.add_parser("send", help="полный прогон через диспетчер")
+    pk = sub.add_parser("ask", help="полный путь без Telegram: агент выполняет задачу")
+    pk.add_argument("--project", help="id проекта (иначе определяется по тексту)")
+    pk.add_argument("--timeout", type=float, default=300)
+    pk.add_argument("text")
+    pk.set_defaults(func=cmd_ask)
+
+    ps = sub.add_parser("send", help="как ask, но с проверкой allowlist по user_id")
     ps.add_argument("--user", type=int, required=True)
+    ps.add_argument("--timeout", type=float, default=300)
     ps.add_argument("text")
     ps.set_defaults(func=cmd_send)
 
     sub.add_parser("queue", help="очередь поручений").set_defaults(func=cmd_queue)
     sub.add_parser("history", help="история событий").set_defaults(func=cmd_history)
-    sub.add_parser("recover", help="подхватить прерванные поручения").set_defaults(func=cmd_recover)
+    sub.add_parser("recover", help="разобрать задачи после перезапуска и выполнить очередь").set_defaults(func=cmd_recover)
 
     pa = sub.add_parser("add-home", help="добавить домик (без правки ядра)")
     pa.add_argument("id")

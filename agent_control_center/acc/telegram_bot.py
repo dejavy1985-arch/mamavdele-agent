@@ -1,7 +1,11 @@
-"""Транспорт Telegram (long polling), запускается ЛОКАЛЬНО на компьютере.
+"""Транспорт Telegram (long polling): единый чат управления агентами.
 
 Использует только стандартную библиотеку (urllib), без сторонних зависимостей.
-Токен берётся из переменной окружения (по умолчанию ACC_TELEGRAM_BOT_TOKEN).
+Токен: переменная окружения ACC_TELEGRAM_BOT_TOKEN или config/telegram_token.txt.
+
+Путь задачи: сообщение -> диспетчер (доступ, границы, проект, очередь) -> ответ
+«Принято» -> исполнитель (worker.py) запускает агента проекта в фоне -> статус и
+результат приходят в тот же чат ответом на исходное сообщение.
 
 Восстановление после перезапуска: смещение обработанных сообщений (update_id)
 хранится в state.json. При старте бот продолжает с сохранённого смещения, поэтому
@@ -24,6 +28,7 @@ import urllib.request
 from . import audit as audit_mod
 from .config import load_config
 from .dispatcher import Dispatcher
+from .worker import Worker
 
 API = "https://api.telegram.org/bot{token}/{method}"
 
@@ -55,11 +60,16 @@ def check_token(token: str) -> str:
     return resp.get("result", {}).get("username", "")
 
 
-def send_message(token: str, chat_id, text: str) -> None:
+def send_message(token: str, chat_id, text: str, reply_to=None) -> None:
     if len(text) > TELEGRAM_TEXT_LIMIT:
         text = text[: TELEGRAM_TEXT_LIMIT - 20] + "\n...(сокращено)"
+    params = {"chat_id": chat_id, "text": text}
+    if reply_to:
+        # Ответ на исходное сообщение; если его удалили, сообщение всё равно придёт.
+        params["reply_parameters"] = json.dumps(
+            {"message_id": int(reply_to), "allow_sending_without_reply": True})
     try:
-        _call(token, "sendMessage", {"chat_id": chat_id, "text": text}, timeout=10)
+        _call(token, "sendMessage", params, timeout=10)
     except Exception as exc:  # сеть не должна ронять цикл
         print(f"[telegram] ошибка отправки: {exc}", file=sys.stderr)
 
@@ -88,10 +98,21 @@ def run(config_path: str) -> int:
     dispatcher = Dispatcher(config)
     log = dispatcher.audit
 
-    # Восстановление после перезапуска: подхватить прерванные поручения.
+    def notifier(chat_id, text, reply_to=None):
+        if chat_id is not None:
+            send_message(token, chat_id, text, reply_to)
+
+    worker = Worker(dispatcher, notifier=notifier, max_parallel=config.max_parallel)
+
+    # Восстановление после перезапуска: очередь продолжится сама, о прерванных
+    # задачах сообщаем в их чаты.
     recovered = dispatcher.recover_after_restart()
     if any(recovered.values()):
         print(f"Восстановление после перезапуска: {recovered}")
+    for t in dispatcher.interrupted_tasks:
+        notifier(t.get("chat_id"),
+                 f"⚠️ Задача #{t['id']} прервана перезапуском центра и не завершена. "
+                 f"Отправьте её заново, если нужно.", t.get("reply_to"))
 
     if len(dispatcher.allowlist) == 0:
         print(
@@ -106,6 +127,7 @@ def run(config_path: str) -> int:
     signal.signal(signal.SIGTERM, _stop)
 
     log.log("bot_start", level=audit_mod.INFO)
+    worker.start()
     print("Центр управления запущен. Ожидаю сообщения в Telegram...")
     try:
         _poll_loop(token, dispatcher, log)
@@ -114,6 +136,7 @@ def run(config_path: str) -> int:
         log.log("bot_stop", level=audit_mod.INFO)
         print("Центр управления остановлен.")
     finally:
+        worker.stop()
         dispatcher.store.close()
     return 0
 
@@ -143,9 +166,11 @@ def _poll_loop(token: str, dispatcher: Dispatcher, log) -> None:
             text = message.get("text", "")
             user_id = user.get("id")
             chat_id = chat.get("id")
+            message_id = message.get("message_id")
 
             try:
-                response = dispatcher.handle(user_id, text)
+                response = dispatcher.handle(user_id, text, chat_id=chat_id,
+                                             reply_to=message_id)
             except Exception as exc:
                 log.log("handle_error", level=audit_mod.ERROR, user_id=user_id, text=str(exc))
                 if chat_id is not None:
@@ -154,7 +179,7 @@ def _poll_loop(token: str, dispatcher: Dispatcher, log) -> None:
 
             if response.silent or chat_id is None:
                 continue
-            send_message(token, chat_id, response.message)
+            send_message(token, chat_id, response.message, message_id)
 
 
 if __name__ == "__main__":

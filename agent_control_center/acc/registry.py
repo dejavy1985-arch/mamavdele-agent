@@ -41,6 +41,7 @@ class Project:
     aliases: List[str] = field(default_factory=list)
     adapter: Dict = field(default_factory=dict)
     allowed_actions: List[str] = field(default_factory=list)
+    test: bool = False  # тестовый агент, не реальный проект пользователя
     raw: Dict = field(default_factory=dict)
 
     def sandbox(self, create: bool = True) -> ProjectSandbox:
@@ -84,6 +85,7 @@ def load_project(manifest_path: str) -> Project:
         aliases=[a.lower() for a in data.get("aliases", [])],
         adapter=data.get("adapter", {}),
         allowed_actions=data.get("allowed_actions", []),
+        test=bool(data.get("test", False)),
         raw=data,
     )
 

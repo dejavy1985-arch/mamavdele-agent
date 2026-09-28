@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fixtures  # noqa: E402
 from acc import cli  # noqa: E402
 
 
@@ -30,12 +31,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Исход маршрутизации", out)
 
-    def test_demo_runs_and_isolates(self):
+    def test_demo_runs_agents_and_isolates(self):
         code, out = run(["demo"])
         self.assertEqual(code, 0)
-        # Демо показывает изоляцию по содержимому: чужое поручение не утекло в beta.
-        self.assertIn("поручение по альфе лежит в test-alpha: True", out)
-        self.assertIn("в test-beta чужого поручения нет: True", out)
+        self.assertIn("тевирп", out)                   # агент альфы реально выполнил
+        self.assertIn("Слов: 3", out)                   # агент беты реально выполнил
+        self.assertNotIn("ДА, изоляции нет", out)
+
+    def _agent_config(self):
+        import json
+        config, base = _fixtures.build_agent_center([("test-agent", ["тест"])])
+        os.makedirs(os.path.join(base, "config"), exist_ok=True)
+        path = os.path.join(base, "config", "control_center.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"homes_dir": config.homes_dir, "var_dir": config.var_dir,
+                       "allowed_user_ids": [111]}, fh)
+        return path
+
+    def test_ask_runs_full_path_without_telegram(self):
+        code, out = run(["--config", self._agent_config(), "ask", "тест: переверни абв"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Принято", out)
+        self.assertIn("вба", out)
+
+    def test_send_respects_allowlist(self):
+        code, out = run(["--config", self._agent_config(), "send", "--user", "999",
+                         "тест: переверни абв"])
+        self.assertEqual(code, 1)
+        self.assertIn("allowlist", out)
 
     def test_add_home_scaffolds_registered(self):
         tmp_homes = tempfile.mkdtemp()

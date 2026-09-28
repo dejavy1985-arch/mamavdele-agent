@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from .registry import Project
+from .runner import ClaudeCodeAdapter, ExecContext, ExecResult, ProcessAdapter
 
 # Виды исхода доставки.
 QUEUED_LOCAL = "queued_local"        # поручение записано в домик проекта
@@ -66,6 +67,15 @@ class ManualAdapter(Adapter):
                 f"(inbox/tasks.jsonl). Его выполнит агент проекта."
             ),
             receipt={"path": rel, "task_id": task.get("id")},
+        )
+
+    def execute(self, project: Project, task: Dict, ctx: ExecContext) -> ExecResult:
+        self.deliver(project, task)
+        # Запись в папку НЕ считается выполнением: executed=False.
+        return ExecResult(
+            ok=True, executed=False,
+            output=("Поручение только записано в папку проекта (inbox/tasks.jsonl). "
+                    "Агент этого проекта не запускается автоматически."),
         )
 
 
@@ -113,6 +123,10 @@ class CrossSessionAdapter(Adapter):
             receipt={"target": target, "text": task.get("text", "")},
         )
 
+    def execute(self, project: Project, task: Dict, ctx: ExecContext) -> ExecResult:
+        res = self.deliver(project, task)
+        return ExecResult(ok=False, executed=False, error=res.message)
+
 
 def build_adapter(project: Project, *, cross_session_available: bool = False) -> Adapter:
     kind = (project.adapter or {}).get("type", "manual")
@@ -120,6 +134,10 @@ def build_adapter(project: Project, *, cross_session_available: bool = False) ->
         return ManualAdapter()
     if kind == "cross_session":
         return CrossSessionAdapter(cross_session_available=cross_session_available)
+    if kind == "process":
+        return ProcessAdapter(project.adapter)
+    if kind == "claude_code":
+        return ClaudeCodeAdapter(project.adapter)
     # local_process и прочие типы на этапе 1 не реализованы: не притворяемся.
     return _UnsupportedAdapter(kind)
 
@@ -137,3 +155,6 @@ class _UnsupportedAdapter(Adapter):
                 f"Задача не отправлена."
             ),
         )
+
+    def execute(self, project: Project, task: Dict, ctx: ExecContext) -> ExecResult:
+        return ExecResult(ok=False, executed=False, error=self.deliver(project, task).message)
