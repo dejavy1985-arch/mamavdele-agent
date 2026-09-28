@@ -154,18 +154,27 @@ def _meminfo() -> Optional[Tuple[float, float]]:
         return None
 
 
-def _reach(url: str, anthropic: bool = False) -> Tuple[str, str]:
+def _reach(url: str, expect_key: str, anthropic: bool = False) -> Tuple[str, str]:
+    """Связь засчитывается, только если ответил сам сервис (его JSON), а не прокси
+    или заглушка провайдера."""
     try:
         with urllib.request.urlopen(url, timeout=15) as resp:
-            return OK, f"доступен (ответ HTTP {resp.status})"
+            code, body = resp.status, resp.read(4000)
     except urllib.error.HTTPError as exc:
-        if anthropic and exc.code == 403:
-            return WARN, ("HTTP 403: сервер Claude отказывает. Так бывает, если страна "
-                          "сервера не поддерживается Anthropic (например, Россия)")
-        return OK, f"доступен (ответ HTTP {exc.code})"
+        code, body = exc.code, (exc.read(4000) if exc.fp else b"")
     except Exception as exc:  # нет сети, DNS, запрет
-        reason = getattr(exc, "reason", exc)
-        return FAIL, f"недоступен: {reason}"
+        return FAIL, f"недоступен: {getattr(exc, 'reason', exc)}"
+    if anthropic and code == 403:
+        return WARN, ("HTTP 403: сервер Claude отказывает. Так бывает, если страна "
+                      "сервера не поддерживается Anthropic (например, Россия)")
+    try:
+        data = json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and expect_key in data:
+        return OK, f"сервис отвечает (HTTP {code})"
+    return FAIL, (f"ответил не сам сервис (HTTP {code}): доступ, видимо, закрыт сетью "
+                  "или провайдером")
 
 
 def check_server(rep: Report, config) -> None:
@@ -204,9 +213,9 @@ def check_server(rep: Report, config) -> None:
     else:
         rep.add(FAIL, "Claude Code", "не найден. Установка: "
                                      "curl -fsSL https://claude.ai/install.sh | bash")
-    mark, detail = _reach("https://api.anthropic.com/v1/models", anthropic=True)
+    mark, detail = _reach("https://api.anthropic.com/v1/models", "error", anthropic=True)
     rep.add(mark, "Связь с сервером Claude (api.anthropic.com)", detail)
-    mark, detail = _reach("https://api.telegram.org/")
+    mark, detail = _reach("https://api.telegram.org/bot0:check/getMe", "ok")
     rep.add(mark, "Связь с Telegram (api.telegram.org)", detail)
 
 

@@ -61,14 +61,18 @@ APP="$SRC/agent_control_center"
 echo "Код: $APP (ветка $BRANCH, коммит $(as_user git -C "$SRC" rev-parse --short HEAD))"
 
 say "4/6 Claude Code для пользователя $U"
-if as_user bash -c 'command -v claude' >/dev/null 2>&1; then
-    echo "Уже установлен: $(as_user claude --version 2>/dev/null || echo '?')"
+claude_version() { as_user claude --version 2>/dev/null; }
+if claude_version >/dev/null; then
+    echo "Уже установлен: $(claude_version)"
 else
-    if as_user bash -c 'curl -fsSL https://claude.ai/install.sh | bash' >/dev/null 2>&1; then
-        echo "Установлен: $(as_user claude --version 2>/dev/null || echo '?')"
+    # pipefail: без него неудачное скачивание выглядело бы как успешная установка.
+    as_user bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash' \
+        >/dev/null 2>&1 || true
+    if claude_version >/dev/null; then
+        echo "Установлен: $(claude_version)"
     else
-        warn "Claude Code не установился. Повторите позже: su - $U, затем"
-        warn "curl -fsSL https://claude.ai/install.sh | bash"
+        warn "Claude Code НЕ установился (не скачался с claude.ai или не запускается)."
+        warn "Повторите позже: su - $U, затем: curl -fsSL https://claude.ai/install.sh | bash"
     fi
 fi
 

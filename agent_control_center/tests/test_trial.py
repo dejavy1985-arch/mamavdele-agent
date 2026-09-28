@@ -146,6 +146,30 @@ class TrialTests(unittest.TestCase):
         self.assertIn("Не проверялся", report)
 
 
+class ReachTests(unittest.TestCase):
+    """Связь засчитывается, только если ответил сам сервис, а не прокси."""
+
+    def reach(self, code, body, anthropic=False):
+        import urllib.error
+        err = urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(body))
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            return trial._reach("https://x", "ok", anthropic=anthropic)[0]
+
+    def test_service_json_counts(self):
+        self.assertEqual(self.reach(401, b'{"ok": false}'), trial.OK)
+
+    def test_proxy_page_does_not_count(self):
+        self.assertEqual(self.reach(403, b"<html>Forbidden</html>"), trial.FAIL)
+
+    def test_anthropic_403_is_region_warning(self):
+        self.assertEqual(self.reach(403, b'{"error": {}}', anthropic=True), trial.WARN)
+
+    def test_no_network(self):
+        import urllib.error
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("dns")):
+            self.assertEqual(trial._reach("https://x", "ok")[0], trial.FAIL)
+
+
 class TrialCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

@@ -434,6 +434,6 @@ class ClaudeCodeAdapter:
             res.ok = False
             res.error = res.output or f"Claude Code вернул ошибку ({data.get('subtype')})."
         cost = data.get("total_cost_usd")
-        if isinstance(cost, (int, float)):
+        if isinstance(cost, (int, float)) and cost > 0:
             res.notes.append(f"стоимость по оценке Claude Code: ${cost:.4f}")
         return res
