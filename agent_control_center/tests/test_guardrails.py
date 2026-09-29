@@ -26,6 +26,25 @@ class GuardrailTests(unittest.TestCase):
         self.assertFalse(check_boundaries("проверь комментарии в инстаграме").blocked)
         self.assertFalse(check_boundaries("сделай раскадровку сцены").blocked)
 
+    def test_ordinary_words_are_not_forbidden_actions(self):
+        # Перевод текста, черновик публикации и вопрос про ключ не запрещённые действия.
+        for text in ["сделай перевод этого текста на английский",
+                     "переведи статью на английский",
+                     "подготовь черновик публикации про ИИ",
+                     "напиши пост про ИИ", "write a blog post draft",
+                     "почему не работает api key в скрипте",
+                     "размести файлы в папке results"]:
+            self.assertFalse(check_boundaries(text).blocked, text)
+
+    def test_other_wordings_are_caught(self):
+        cases = {"запость в канал": "publish",
+                 "размести это в ленте инстаграма": "publish",
+                 "скинь Марине ответ в личку": "message_clients",
+                 "отправь письмо поставщику": "message_clients",
+                 "переведи 500 рублей на карту": "payments"}
+        for text, cat in cases.items():
+            self.assertIn(cat, check_boundaries(text).categories, text)
+
 
 class RiskyActionTests(unittest.TestCase):
     def test_delete_requires_confirmation(self):

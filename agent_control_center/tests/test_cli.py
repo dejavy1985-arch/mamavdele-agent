@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import _fixtures  # noqa: E402
-from acc import cli  # noqa: E402
+from acc import cli, runner  # noqa: E402
 
 
 def run(argv):
@@ -36,7 +36,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("тевирп", out)                   # агент альфы реально выполнил
         self.assertIn("Слов: 3", out)                   # агент беты реально выполнил
-        self.assertNotIn("ДА, изоляции нет", out)
+        if runner.sandbox_available():
+            self.assertNotIn("ДА, изоляции нет", out)
+        else:
+            # Без песочницы (Windows без WSL2) демо обязано честно сказать, что изоляции нет.
+            self.assertIn("ДА, изоляции нет", out)
 
     def _agent_config(self):
         import json

@@ -357,7 +357,9 @@ def find_claude() -> Optional[str]:
     found = shutil.which("claude")
     if found:
         return found
-    local = os.path.expanduser("~/.local/bin/claude")
+    # На Windows установщик кладёт claude.exe в %USERPROFILE%\.local\bin.
+    name = "claude.exe" if os.name == "nt" else "claude"
+    local = os.path.join(os.path.expanduser("~"), ".local", "bin", name)
     return local if os.path.isfile(local) and os.access(local, os.X_OK) else None
 
 

@@ -1,5 +1,6 @@
 """Тесты реального выполнения агентов: процесс, изоляция, секреты, Claude Code."""
 
+import contextlib
 import json
 import os
 import stat
@@ -202,10 +203,16 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.config, _ = _fixtures.build_center(manifests=[])
         bindir = os.path.join(tempfile.mkdtemp(), "bin")
         os.makedirs(bindir)
-        self.claude = os.path.join(bindir, "claude")
-        with open(self.claude, "w", encoding="utf-8") as fh:
+        script = os.path.join(bindir, "claude")
+        with open(script, "w", encoding="utf-8") as fh:
             fh.write(FAKE_CLAUDE.format(python=sys.executable))
-        os.chmod(self.claude, os.stat(self.claude).st_mode | stat.S_IEXEC)
+        os.chmod(script, os.stat(script).st_mode | stat.S_IEXEC)
+        self.claude = script
+        if os.name == "nt":
+            # Windows не запускает скрипт по строке #!, поэтому запуск через .cmd.
+            self.claude = script + ".cmd"
+            with open(self.claude, "w", encoding="utf-8") as fh:
+                fh.write('@"%s" "%s" %%*\r\n' % (sys.executable, script))
         home = os.path.join(self.config.homes_dir, "cc")
         os.makedirs(os.path.join(home, "secrets"))
         with open(os.path.join(home, "secrets", "agent.env"), "w") as fh:
@@ -267,9 +274,16 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         lines = open(self.calls, encoding="utf-8").read().splitlines()
         return json.loads(lines[-1])["args"]
 
+    @contextlib.contextmanager
+    def _pretend_sandbox(self):
+        """Считать, что песочница есть, даже там, где bubblewrap не установлен."""
+        with mock.patch.object(runner, "will_isolate", return_value=True),                 mock.patch.object(runner, "build_sandbox_command",
+                                  side_effect=lambda cmd, *a, **k: list(cmd)):
+            yield
+
     def test_tools_allowed_only_inside_sandbox(self):
         # В песочнице агенту разрешены команды и интернет, иначе он умеет только править файлы.
-        with mock.patch.object(runner, "will_isolate", return_value=True):
+        with self._pretend_sandbox():
             args = self._args()
         tools = args[args.index("--allowedTools") + 1].split(",")
         self.assertIn("Bash", tools)
@@ -279,7 +293,7 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.assertNotIn("--allowedTools", args)
 
     def test_explicit_tools_from_manifest_win(self):
-        with mock.patch.object(runner, "will_isolate", return_value=True):
+        with self._pretend_sandbox():
             args = self._args(allowed_tools=["Read"])
         self.assertEqual(args[args.index("--allowedTools") + 1], "Read")
 
@@ -287,12 +301,12 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as fake_home:
             local = os.path.join(fake_home, ".local", "bin")
             os.makedirs(local)
-            target = os.path.join(local, "claude")
+            target = os.path.join(local, "claude.exe" if os.name == "nt" else "claude")
             with open(target, "w") as fh:
                 fh.write("#!/bin/sh\n")
             os.chmod(target, 0o755)
             with mock.patch("shutil.which", return_value=None), \
-                    mock.patch.dict(os.environ, {"HOME": fake_home}):
+                    mock.patch.dict(os.environ, {"HOME": fake_home, "USERPROFILE": fake_home}):
                 self.assertEqual(runner.find_claude(), target)
 
     def test_error_result_is_failure(self):

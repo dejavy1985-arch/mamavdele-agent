@@ -192,7 +192,8 @@ class TrialCliTests(unittest.TestCase):
             cli.main(["--config", self.cfg, "set-owner", "555"])
         with open(self.cfg, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["allowed_user_ids"], [555])
-        self.assertEqual(stat.S_IMODE(os.stat(self.cfg).st_mode), 0o600)
+        if os.name == "posix":  # на Windows доступ задают права папки профиля (ACL)
+            self.assertEqual(stat.S_IMODE(os.stat(self.cfg).st_mode), 0o600)
 
     def test_telegram_id_lists_senders_and_marks_old_messages_read(self):
         calls = []
